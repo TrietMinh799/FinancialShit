@@ -26,6 +26,15 @@ OPENAI_MODEL: str = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
 MODEL: str = "google/gemma-4-31b-it:free"          # OpenRouter default
 OPENROUTER_MODELS_URL: str = "https://openrouter.ai/api/v1/models"
 
+# Base URL for any OpenAI-compatible Chat Completions provider.
+# Examples:
+#   OpenAI      -> https://api.openai.com/v1
+#   OpenRouter  -> https://openrouter.ai/api/v1
+#   Groq        -> https://api.groq.com/openai/v1
+#   Together    -> https://api.together.xyz/v1
+#   Ollama      -> http://localhost:11434/v1
+LLM_BASE_URL: str = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+
 # ---------------------------------------------------------------------------
 # NLP helpers
 # ---------------------------------------------------------------------------

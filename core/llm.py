@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 from core.config import (
     EXECUTION_TERMS,
     GROWTH_TERMS,
+    LLM_BASE_URL,
     MOAT_TERMS,
     OPENAI_MODEL,
     RISK_TERMS,
@@ -69,7 +70,7 @@ def fallback_answer(question: str, citations: list[dict]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# OpenAI HTTP call
+# LLM HTTP call (OpenAI-compatible Chat Completions)
 # ---------------------------------------------------------------------------
 
 def call_openai_llm(
@@ -77,20 +78,25 @@ def call_openai_llm(
     citations: list[dict],
     api_key: str | None = None,
     model: str | None = None,
+    base_url: str | None = None,
 ) -> str | None:
-    """Send *question* + retrieved *citations* to the OpenAI Responses API.
+    """Send *question* + retrieved *citations* to an OpenAI-compatible LLM.
+
+    Uses the standard ``/chat/completions`` endpoint, so it works with OpenAI,
+    OpenRouter, Groq, Together, Ollama, and any other compatible provider.
 
     Returns the assistant text, or ``None`` if no API key is configured.
     """
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
     model = model or OPENAI_MODEL
+    base_url = (base_url or LLM_BASE_URL).rstrip("/")
     if not api_key:
         return None
 
     context = build_context(citations)
     payload = {
         "model": model,
-        "input": [
+        "messages": [
             {
                 "role": "system",
                 "content": (
@@ -110,7 +116,7 @@ def call_openai_llm(
     }
     data = json.dumps(payload).encode("utf-8")
     request = Request(
-        "https://api.openai.com/v1/responses",
+        f"{base_url}/chat/completions",
         data=data,
         headers={
             "Content-Type": "application/json",
@@ -121,11 +127,37 @@ def call_openai_llm(
     with urlopen(request, timeout=60) as response:
         result = json.loads(response.read().decode("utf-8"))
 
+    return _extract_message(result)
+
+
+def _extract_message(result: dict) -> str | None:
+    """Pull the assistant text out of a Chat Completions response.
+
+    Handles the standard ``choices[0].message.content`` shape, including the
+    list-of-parts variant some providers return, and the legacy Responses-API
+    ``output_text`` field as a fallback.
+    """
+    choices = result.get("choices") or []
+    if choices:
+        message = choices[0].get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        # Some providers return content as a list of typed parts.
+        if isinstance(content, list):
+            parts = [
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("text")
+            ]
+            joined = "\n".join(parts).strip()
+            if joined:
+                return joined
+
+    # Legacy Responses-API fallback.
     if result.get("output_text"):
         return result["output_text"]
-
-    # Fallback: walk the output array
-    parts: list[str] = []
+    parts = []
     for output in result.get("output", []):
         for content in output.get("content", []):
             if content.get("type") in {"output_text", "text"} and content.get("text"):
