@@ -1,387 +1,432 @@
 <!doctype html>
-<html lang="en">
-
+<html lang="vi">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Phân Tích Định Giá RAG</title>
-  <meta name="description" content="Phân tích lợi thế cạnh tranh và định giá bằng AI sử dụng RAG trên các tài liệu tài chính của bạn." />
+  <title>RAG Định Giá – Chatbot</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/static/styles.css" />
   <style>
-    /* ── App-specific additions (not in the base design system) ── */
+    /* ── Modal overlay ── */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.65);
+      backdrop-filter: blur(6px);
+      z-index: 200;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-backdrop.open { display: flex; }
 
-    /* Scrollable main panel instead of fixed height */
-    .content-main {
-      flex: 1;
+    .modal {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-bright);
+      border-radius: 18px;
+      padding: 28px 28px 24px;
+      width: min(480px, 92vw);
+      box-shadow: 0 24px 64px rgba(0,0,0,0.6);
       display: flex;
       flex-direction: column;
-      height: 100vh;
-      overflow: hidden;
-      background: var(--bg-base);
-      position: relative;
+      gap: 16px;
     }
-
-    /* Scrollable content area */
-    .content-scroll {
-      flex: 1;
-      overflow-y: auto;
-      overflow-x: hidden;
-      padding: 24px 28px 40px;
-      scroll-behavior: smooth;
-      position: relative;
-      z-index: 1;
-    }
-    .content-scroll::-webkit-scrollbar { width: 5px; }
-    .content-scroll::-webkit-scrollbar-track { background: transparent; }
-    .content-scroll::-webkit-scrollbar-thumb { background: var(--bg-active); border-radius: 99px; }
-
-    /* Panel cards */
-    .panel {
-      background: var(--bg-surface);
-      border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 20px;
-      margin-bottom: 16px;
-    }
-    .panel:hover { border-color: var(--border-bright); }
-
-    .panel-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 16px;
-    }
-
-    .panel-head h2 {
-      font-size: 15px;
-      font-weight: 600;
+    .modal-title {
+      font-size: 16px;
+      font-weight: 700;
       color: var(--text-primary);
       margin: 0;
-      letter-spacing: -0.2px;
     }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      min-height: 22px;
-      border-radius: 999px;
-      padding: 0 10px;
-      background: rgba(99,102,241,0.12);
-      border: 1px solid rgba(99,102,241,0.25);
-      color: #a5b4fc;
-      font-size: 11px;
-      font-weight: 600;
-      white-space: nowrap;
-    }
-
-    /* Form layout */
-    .form-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-      margin-bottom: 14px;
-    }
-
-    label {
-      display: grid;
-      gap: 6px;
+    .modal-subtitle {
+      font-size: 12.5px;
       color: var(--text-muted);
+      margin: -8px 0 0;
+    }
+
+    .field-label {
+      display: block;
       font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
     }
-
-    input[type="text"],
-    input[type="password"],
-    input[type="file"],
-    input:not([type]) {
+    .field-input {
       width: 100%;
       background: var(--bg-elevated);
       border: 1px solid var(--border-bright);
-      border-radius: 8px;
+      border-radius: 9px;
       padding: 9px 12px;
       color: var(--text-primary);
       font-size: 13px;
       font-family: inherit;
       outline: none;
-      transition: border-color var(--transition), box-shadow var(--transition);
+      transition: border-color .2s, box-shadow .2s;
     }
-    input:focus {
-      border-color: rgba(99,102,241,0.5);
-      box-shadow: 0 0 0 3px rgba(99,102,241,0.1);
+    .field-input:focus {
+      border-color: rgba(99,102,241,.5);
+      box-shadow: 0 0 0 3px rgba(99,102,241,.1);
     }
-    input[type="file"] { cursor: pointer; color: var(--text-secondary); }
-    input::placeholder { color: var(--text-muted); }
+    .field-input::placeholder { color: var(--text-muted); }
 
-    textarea.panel-textarea {
-      width: 100%;
+    .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+    .modal-actions { display: flex; gap: 10px; justify-content: flex-end; }
+    .btn-cancel {
       background: var(--bg-elevated);
       border: 1px solid var(--border-bright);
-      border-radius: 8px;
-      padding: 10px 12px;
-      color: var(--text-primary);
+      border-radius: 9px;
+      padding: 8px 18px;
       font-size: 13px;
-      font-family: inherit;
-      outline: none;
-      resize: vertical;
-      min-height: 90px;
-      line-height: 1.5;
-      transition: border-color var(--transition), box-shadow var(--transition);
+      font-weight: 600;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: background .2s;
     }
-    textarea.panel-textarea:focus {
-      border-color: rgba(99,102,241,0.5);
-      box-shadow: 0 0 0 3px rgba(99,102,241,0.1);
+    .btn-cancel:hover { background: var(--bg-hover); }
+    .btn-submit {
+      background: linear-gradient(135deg,#6366f1,#a855f7);
+      border: none;
+      border-radius: 9px;
+      padding: 8px 22px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #fff;
+      cursor: pointer;
+      box-shadow: 0 2px 8px rgba(99,102,241,.35);
+      transition: opacity .2s;
     }
-    textarea.panel-textarea::placeholder { color: var(--text-muted); }
+    .btn-submit:hover { opacity: .88; }
+    .btn-submit:disabled { opacity: .45; cursor: not-allowed; }
 
-    /* Buttons */
-    .btn {
-      display: inline-flex;
+    /* ── Sidebar tool buttons ── */
+    .tool-btn {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      width: 100%;
+      padding: 9px 10px;
+      border-radius: 10px;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--text-secondary);
+      background: transparent;
+      border: 1px solid transparent;
+      cursor: pointer;
+      text-align: left;
+      transition: background .2s, border-color .2s, color .2s;
+      margin-bottom: 4px;
+    }
+    .tool-btn:hover { background: var(--bg-elevated); color: var(--text-primary); border-color: var(--border); }
+    .tool-btn-icon {
+      width: 30px;
+      height: 30px;
+      border-radius: 8px;
+      display: flex;
       align-items: center;
       justify-content: center;
-      gap: 7px;
-      min-height: 36px;
-      border-radius: 9px;
-      padding: 0 16px;
-      font-size: 13px;
-      font-weight: 600;
-      font-family: inherit;
-      cursor: pointer;
-      border: 1px solid var(--border-bright);
-      background: var(--bg-elevated);
-      color: var(--text-primary);
-      transition: background var(--transition), border-color var(--transition), transform var(--transition);
+      flex-shrink: 0;
     }
-    .btn:hover { background: var(--bg-hover); border-color: rgba(255,255,255,0.18); }
-    .btn:active { transform: scale(0.97); }
+    .icon--green  { background: rgba(52,211,153,.15); color: #34d399; }
+    .icon--blue   { background: rgba(96,165,250,.15); color: #60a5fa; }
+    .icon--violet { background: rgba(168,85,247,.15); color: #a855f7; }
+    .icon--amber  { background: rgba(251,191,36,.12); color: #fbbf24; }
 
-    .btn-primary {
-      background: var(--gradient);
-      border-color: transparent;
-      color: #fff;
-      box-shadow: 0 2px 8px rgba(99,102,241,0.35);
-    }
-    .btn-primary:hover { opacity: 0.9; border-color: transparent; box-shadow: 0 4px 16px rgba(99,102,241,0.5); }
-    .btn-full { width: 100%; }
-
-    .btn-row {
-      display: flex;
-      gap: 10px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-
-    /* Data cards */
-    .cards-grid {
-      display: grid;
-      gap: 10px;
-    }
-    .two-col { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .three-col { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .five-col { grid-template-columns: repeat(5, minmax(0, 1fr)); }
-    .four-col { grid-template-columns: repeat(4, minmax(0, 1fr)); }
-
-    .data-card {
-      background: var(--bg-elevated);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 13px 14px;
-    }
-
-    .data-card-label {
-      display: block;
-      font-size: 10.5px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.6px;
-      color: var(--text-muted);
-      margin-bottom: 7px;
-    }
-
-    .data-card-value {
-      display: block;
-      font-size: 22px;
-      font-weight: 700;
-      color: var(--text-primary);
-      letter-spacing: -0.5px;
-    }
-
-    .data-card p {
-      margin: 6px 0 0;
-      font-size: 12px;
-      color: var(--text-secondary);
-      line-height: 1.4;
-    }
-
-    /* Score cards */
-    .score-card {
-      background: var(--bg-elevated);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 13px 14px;
-      text-align: center;
-    }
-    .score-card-label {
-      display: block;
-      font-size: 10.5px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.6px;
-      color: var(--text-muted);
-      margin-bottom: 8px;
-    }
-    .score-card-value {
-      font-size: 26px;
-      font-weight: 700;
-      background: var(--gradient);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-
-    /* Citation cards */
-    .citation-card {
-      background: var(--bg-elevated);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 12px 14px;
-    }
-    .citation-card-label {
-      display: block;
-      font-size: 10.5px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      color: var(--text-muted);
-      margin-bottom: 5px;
-    }
-    .citation-card strong {
-      display: block;
-      font-size: 12.5px;
-      font-weight: 600;
-      color: var(--text-primary);
-      margin-bottom: 5px;
-    }
-    .citation-card p {
-      font-size: 12px;
-      color: var(--text-secondary);
-      line-height: 1.5;
-      margin: 0;
-    }
-
-    /* SWOT */
-    .swot-good strong { color: var(--accent-green); }
-    .swot-bad  strong { color: #f87171; }
-    .swot-opp  strong { color: #818cf8; }
-    .swot-risk strong { color: #fbbf24; }
-
-    /* Answer panel */
-    .answer-text {
-      white-space: pre-wrap;
-      color: var(--text-primary);
-      font-size: 13.5px;
-      line-height: 1.7;
-    }
-
-    /* Source pills */
-    .source-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      border: 1px solid var(--border-bright);
-      border-radius: 999px;
-      padding: 3px 10px;
-      margin: 0 5px 5px 0;
-      color: var(--text-secondary);
-      font-size: 11px;
-    }
-
-    /* Remember row */
-    .remember-row {
+    /* ── API key row in sidebar ── */
+    .api-key-row {
       display: flex;
       align-items: center;
       gap: 8px;
-      color: var(--text-secondary);
-      font-size: 12px;
-      font-weight: 400;
-      text-transform: none;
-      letter-spacing: 0;
+      padding: 10px 14px;
+      margin: 10px 14px 0;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .api-key-row input {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      font-size: 12.5px;
+      color: var(--text-primary);
+      font-family: inherit;
+    }
+    .api-key-row input::placeholder { color: var(--text-muted); }
+    .api-key-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--text-muted);
+      flex-shrink: 0;
+      transition: background .3s;
+    }
+    .api-key-dot.ok  { background: #34d399; box-shadow: 0 0 6px #34d399; }
+    .api-key-dot.err { background: #f87171; box-shadow: 0 0 6px #f87171; }
+
+    /* ── Welcome screen ── */
+    .welcome-screen {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 40px 24px 60px;
+      flex: 1;
+    }
+    .welcome-icon {
+      width: 72px; height: 72px;
+      border-radius: 20px;
+      background: linear-gradient(135deg,rgba(99,102,241,.2),rgba(168,85,247,.2));
+      border: 1px solid rgba(99,102,241,.3);
+      display: flex; align-items: center; justify-content: center;
+      color: #a855f7;
+      margin-bottom: 20px;
+      box-shadow: 0 0 24px rgba(99,102,241,.25);
+      animation: float 4s ease-in-out infinite;
+    }
+    @keyframes float {
+      0%,100% { transform: translateY(0); }
+      50%      { transform: translateY(-6px); }
+    }
+    .welcome-title {
+      font-size: 26px; font-weight: 700; letter-spacing: -.5px;
+      background: linear-gradient(135deg,#6366f1,#a855f7);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+      background-clip: text;
       margin-bottom: 10px;
     }
-    .remember-row input[type="checkbox"] {
-      width: auto;
-      accent-color: #6366f1;
+    .welcome-desc {
+      font-size: 14px; color: var(--text-secondary);
+      max-width: 460px; line-height: 1.7; margin-bottom: 36px;
     }
-
-    .muted-note {
-      font-size: 12px;
-      color: var(--text-muted);
-      line-height: 1.5;
-      margin: 0;
-    }
-
-    /* Chat input at bottom of chat section */
-    .inline-chat-row {
+    .starter-cards {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 10px;
-      align-items: end;
-      margin-top: 10px;
+      grid-template-columns: repeat(2,1fr);
+      gap: 10px; width: 100%; max-width: 620px;
     }
-
-    /* Sidebar library docs (dynamic) */
-    .lib-doc-card {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      padding: 9px 10px;
-      border-radius: 10px;
-      border: 1px solid transparent;
+    .starter-card {
+      display: flex; align-items: center; gap: 12px; text-align: left;
+      padding: 14px 16px;
+      border-radius: 14px;
       background: var(--bg-elevated);
-      margin-bottom: 6px;
-      transition: background var(--transition);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      transition: background .2s, border-color .2s, transform .2s, box-shadow .2s;
     }
-    .lib-doc-card:hover { background: var(--bg-hover); }
+    .starter-card:hover {
+      background: var(--bg-hover);
+      border-color: rgba(99,102,241,.4);
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(0,0,0,.3);
+    }
+    .starter-card-icon {
+      font-size: 22px; flex-shrink: 0;
+      width: 38px; height: 38px;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--bg-active); border-radius: 10px;
+    }
+    .starter-card-title { font-size: 13px; font-weight: 600; color: var(--text-primary); display: block; }
+    .starter-card-desc  { font-size: 11.5px; color: var(--text-secondary); margin-top: 2px; display: block; }
 
-    /* Status dot in header */
-    .status-text {
-      font-size: 12px;
-      color: var(--text-muted);
+    /* ── Chat layout ── */
+    .chat-main {
+      flex: 1; display: flex; flex-direction: column;
+      height: 100vh; overflow: hidden;
+      background: var(--bg-base);
+    }
+    .chat-body {
+      flex: 1; overflow-y: auto; overflow-x: hidden;
+      display: flex; flex-direction: column;
+      scroll-behavior: smooth;
+    }
+    .chat-body::-webkit-scrollbar { width: 5px; }
+    .chat-body::-webkit-scrollbar-track { background: transparent; }
+    .chat-body::-webkit-scrollbar-thumb { background: var(--bg-active); border-radius: 99px; }
+
+    .messages-list {
+      display: flex; flex-direction: column; gap: 6px;
+      padding: 20px 20px 8px;
+      max-width: 820px; margin: 0 auto; width: 100%;
     }
 
-    /* Section divider */
-    .section-divider {
-      height: 1px;
-      background: var(--border);
-      margin: 8px 0 16px;
+    /* ── Chat input ── */
+    .chat-input-area {
+      padding: 12px 20px 18px;
+      border-top: 1px solid var(--border);
+      background: rgba(13,15,20,.9);
+      backdrop-filter: blur(12px);
+      flex-shrink: 0;
+    }
+    .input-wrapper { max-width: 820px; margin: 0 auto; }
+    .input-box {
+      display: flex; align-items: flex-end; gap: 10px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-bright);
+      border-radius: 16px;
+      padding: 10px 10px 10px 16px;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    .input-box:focus-within {
+      border-color: rgba(99,102,241,.5);
+      box-shadow: 0 0 0 3px rgba(99,102,241,.1);
+    }
+    .input-textarea {
+      flex: 1; min-height: 24px; max-height: 180px;
+      font-size: 14px; line-height: 1.6; resize: none;
+      background: transparent; border: none; outline: none;
+      color: var(--text-primary); font-family: inherit;
+      overflow-y: auto;
+    }
+    .input-textarea::placeholder { color: var(--text-muted); }
+    .send-btn {
+      width: 36px; height: 36px; border-radius: 10px;
+      display: flex; align-items: center; justify-content: center;
+      background: linear-gradient(135deg,#6366f1,#a855f7);
+      color: #fff; border: none; cursor: pointer; flex-shrink: 0;
+      box-shadow: 0 2px 8px rgba(99,102,241,.35);
+      transition: opacity .2s, transform .2s;
+    }
+    .send-btn:disabled { opacity: .35; cursor: not-allowed; box-shadow: none; }
+    .send-btn:not(:disabled):hover { opacity: .9; transform: scale(1.05); }
+    .input-hint {
+      text-align: center; font-size: 11px; color: var(--text-muted); margin-top: 7px;
+    }
+    .input-hint kbd {
+      display: inline-block; padding: 1px 5px; border-radius: 4px;
+      background: var(--bg-active); border: 1px solid var(--border-bright);
+      font-family: inherit; font-size: 10px; color: var(--text-secondary);
     }
 
-    ul.plain-list {
-      margin: 0;
-      padding-left: 16px;
+    /* ── Messages ── */
+    .message { display: flex; gap: 12px; animation: fadeUp .3s ease-out; }
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
     }
-    ul.plain-list li {
-      font-size: 12.5px;
+    .message--user { flex-direction: row-reverse; }
+    .message-avatar {
+      width: 32px; height: 32px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 13px; font-weight: 700; flex-shrink: 0; margin-top: 4px;
+    }
+    .message--bot .message-avatar {
+      background: linear-gradient(135deg,#6366f1,#a855f7);
+      color: #fff; box-shadow: 0 0 16px rgba(99,102,241,.3);
+    }
+    .message--user .message-avatar {
+      background: var(--bg-active); color: var(--text-secondary);
+      border: 1px solid var(--border-bright);
+    }
+    .message-content { display: flex; flex-direction: column; max-width: 75%; }
+    .message--user .message-content { align-items: flex-end; }
+    .message-bubble {
+      padding: 12px 16px; border-radius: 18px;
+      font-size: 14px; line-height: 1.65;
+    }
+    .message--bot .message-bubble {
+      background: var(--bg-elevated); border: 1px solid var(--border);
+      border-top-left-radius: 4px; color: var(--text-primary);
+    }
+    .message--user .message-bubble {
+      background: linear-gradient(135deg,#6366f1,#a855f7);
+      color: #fff; border-top-right-radius: 4px;
+      box-shadow: 0 2px 12px rgba(99,102,241,.35);
+    }
+    .message-meta { font-size: 11px; color: var(--text-muted); margin-top: 5px; padding: 0 4px; }
+    .message-sources { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+    .source-tag {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 3px 9px; border-radius: 99px; font-size: 11px; font-weight: 500;
+      background: rgba(99,102,241,.12); border: 1px solid rgba(99,102,241,.25);
+      color: #a5b4fc;
+    }
+
+    /* ── Typing indicator ── */
+    .typing-indicator {
+      display: flex; gap: 12px; animation: fadeUp .3s ease-out;
+      padding: 0 20px; max-width: 820px; margin: 0 auto; width: 100%;
+    }
+    .typing-bubble {
+      background: var(--bg-elevated); border: 1px solid var(--border);
+      border-radius: 18px; border-top-left-radius: 4px;
+      padding: 14px 18px; display: flex; align-items: center; gap: 5px;
+    }
+    .typing-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--text-muted);
+      animation: bounce 1.2s ease-in-out infinite;
+    }
+    .typing-dot:nth-child(2) { animation-delay: .2s; }
+    .typing-dot:nth-child(3) { animation-delay: .4s; }
+    @keyframes bounce {
+      0%,80%,100% { transform: translateY(0); background: var(--text-muted); }
+      40% { transform: translateY(-6px); background: #a855f7; }
+    }
+
+    /* ── Analysis result card ── */
+    .result-card {
+      background: var(--bg-elevated); border: 1px solid var(--border);
+      border-radius: 14px; padding: 16px 18px; margin-top: 10px;
+      font-size: 13px; color: var(--text-secondary); line-height: 1.6;
+    }
+    .result-card h4 {
+      font-size: 13px; font-weight: 600; color: var(--text-primary);
+      margin: 0 0 8px;
+    }
+    .result-card .score-row {
+      display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px;
+    }
+    .score-chip {
+      background: rgba(99,102,241,.1); border: 1px solid rgba(99,102,241,.2);
+      border-radius: 8px; padding: 5px 10px; font-size: 12px; font-weight: 600;
+      color: #a5b4fc;
+    }
+    .result-card ul { margin: 4px 0 0 16px; }
+    .result-card li { margin-bottom: 3px; }
+    .result-section { margin-top: 10px; }
+    .result-section-title {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .6px; color: var(--text-muted); margin-bottom: 4px;
+    }
+
+    /* ── Library list in sidebar ── */
+    #sidebarDocs { padding: 4px 0; }
+    .lib-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 7px 10px; border-radius: 8px; font-size: 12px;
       color: var(--text-secondary);
-      line-height: 1.6;
-      margin-bottom: 3px;
+      transition: background .2s;
+    }
+    .lib-item:hover { background: var(--bg-elevated); }
+    .lib-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .lib-dot--book   { background: #34d399; }
+    .lib-dot--report { background: #60a5fa; }
+
+    /* ── Remember checkbox ── */
+    .remember-row {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11.5px; color: var(--text-muted); margin-top: 6px;
+    }
+    .remember-row input { accent-color: #6366f1; }
+
+    /* ── Status bar ── */
+    .status-bar {
+      font-size: 11px; color: var(--text-muted);
+      text-align: center; padding: 4px 0 2px;
     }
 
-    /* Responsive */
-    @media (max-width: 900px) {
-      .form-grid, .two-col, .three-col, .five-col, .four-col { grid-template-columns: 1fr; }
-    }
     @media (max-width: 768px) {
-      .content-scroll { padding: 16px 14px 32px; }
+      .starter-cards { grid-template-columns: 1fr; }
+      .messages-list { padding: 14px 12px 8px; }
+      .message-content { max-width: 88%; }
+      .typing-indicator { padding: 0 12px; }
+      .row-2 { grid-template-columns: 1fr; }
     }
   </style>
 </head>
-
 <body>
   <div class="sidebar-overlay" id="sidebarOverlay"></div>
 
@@ -398,60 +443,77 @@
           </div>
           <span class="logo-text">RAG Định Giá</span>
         </div>
-        <button class="sidebar-close-btn" id="sidebarCloseBtn" aria-label="Đóng thanh bên">
+        <button class="sidebar-close-btn" id="sidebarCloseBtn" aria-label="Đóng">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
           </svg>
         </button>
       </div>
 
-      <!-- Library Stats -->
-      <div class="sidebar-section">
-        <div class="sidebar-section-title">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-          </svg>
-          Thư Viện Nghiên Cứu
+      <!-- API Key -->
+      <div style="padding:14px 14px 0">
+        <div class="sidebar-section-title" style="margin-bottom:8px">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          Khóa API
         </div>
-        <div id="sidebarLibrary">
-          <p style="font-size:12px;color:var(--text-muted)">Đang tải…</p>
+        <div class="api-key-row">
+          <div class="api-key-dot" id="apiKeyDot"></div>
+          <input id="apiKey" type="password" placeholder="sk-… hoặc sk-or-…" autocomplete="off" />
         </div>
+        <div style="padding:4px 0 0 4px">
+          <label class="remember-row">
+            <input id="rememberKey" type="checkbox" /> Ghi nhớ trong trình duyệt
+          </label>
+        </div>
+        <div style="padding:6px 0 0 2px">
+          <label class="field-label" style="margin-bottom:4px">Mô hình</label>
+          <input id="modelName" class="field-input" value="gpt-4.1-mini" style="padding:7px 10px;font-size:12.5px" />
+        </div>
+        <button class="tool-btn" id="testKeyBtn" style="margin-top:8px;font-size:12px">
+          <span class="tool-btn-icon icon--violet">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+          </span>
+          Kiểm tra API Key
+        </button>
       </div>
 
-      <!-- Workflow -->
-      <div class="sidebar-section">
-        <div class="sidebar-section-title">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-          </svg>
-          Quy Trình
+      <div style="height:1px;background:var(--border);margin:14px 0 0"></div>
+
+      <!-- Actions -->
+      <div class="sidebar-section" style="padding-top:14px">
+        <div class="sidebar-section-title" style="margin-bottom:10px">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          Công Cụ
         </div>
-        <div class="doc-list">
-          <div class="doc-card active">
-            <div class="doc-icon doc-icon--green">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-              </svg>
-            </div>
-            <div class="doc-info"><span class="doc-name">1. Tải Sách Lên</span><span class="doc-meta">Xây dựng cơ sở tri thức RAG</span></div>
-          </div>
-          <div class="doc-card">
-            <div class="doc-icon doc-icon--blue">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
-              </svg>
-            </div>
-            <div class="doc-info"><span class="doc-name">2. Phân Tích Báo Cáo</span><span class="doc-meta">Đánh giá lợi thế cạnh tranh</span></div>
-          </div>
-          <div class="doc-card">
-            <div class="doc-icon doc-icon--violet">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-              </svg>
-            </div>
-            <div class="doc-info"><span class="doc-name">3. Đặt Câu Hỏi</span><span class="doc-meta">Hỏi đáp dựa trên dữ liệu</span></div>
-          </div>
+        <button class="tool-btn" id="openBookModal">
+          <span class="tool-btn-icon icon--green">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </span>
+          Thêm Sách Vào RAG
+        </button>
+        <button class="tool-btn" id="openReportModal">
+          <span class="tool-btn-icon icon--blue">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          </span>
+          Phân Tích Báo Cáo Thường Niên
+        </button>
+        <button class="tool-btn" id="clearChatBtn">
+          <span class="tool-btn-icon icon--amber">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.31"/></svg>
+          </span>
+          Cuộc Trò Chuyện Mới
+        </button>
+      </div>
+
+      <div style="height:1px;background:var(--border);margin:14px 0 0"></div>
+
+      <!-- Library -->
+      <div class="sidebar-section" style="flex:1;overflow-y:auto;padding-top:14px">
+        <div class="sidebar-section-title" style="margin-bottom:8px">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          Thư Viện (<span id="libCount">0</span> tài liệu)
         </div>
+        <div id="sidebarDocs"><p style="font-size:11.5px;color:var(--text-muted);padding:0 4px">Đang tải…</p></div>
       </div>
 
       <!-- Footer -->
@@ -462,18 +524,15 @@
             <span class="user-name">Chuyên Viên Nghiên Cứu</span>
             <span class="user-plan" id="statusText">Sẵn sàng</span>
           </div>
-          <button class="settings-btn" aria-label="Cài đặt" id="refreshButton" title="Làm mới thư viện">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-            </svg>
+          <button class="settings-btn" id="refreshLibBtn" title="Làm mới thư viện">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
           </button>
         </div>
       </div>
     </aside>
 
-    <!-- ── MAIN CONTENT ── -->
-    <main class="content-main">
-
+    <!-- ── MAIN CHAT ── -->
+    <main class="chat-main">
       <!-- Header -->
       <header class="chat-header">
         <button class="menu-btn" id="menuBtn" aria-label="Mở menu">
@@ -484,619 +543,573 @@
         <div class="header-bot-info">
           <div class="bot-status-dot"></div>
           <div>
-            <h1 class="header-title">Chuyên Viên Phân Tích Lợi Thế Cạnh Tranh</h1>
+            <h1 class="header-title">Chuyên Viên Phân Tích Định Giá</h1>
             <span class="header-subtitle">RAG Định Giá · Phân tích dựa trên bằng chứng</span>
           </div>
         </div>
         <div class="header-actions">
-          <button class="btn" id="testKeyButton" title="Kiểm tra API Key">Kiểm tra API Key</button>
+          <button class="tool-btn" id="headerUploadBook" style="width:auto;padding:0 12px;min-height:34px;font-size:12.5px;margin:0">
+            <span class="tool-btn-icon icon--green" style="width:22px;height:22px;border-radius:6px">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            </span>
+            Thêm Sách
+          </button>
+          <button class="tool-btn" id="headerAnalyzeReport" style="width:auto;padding:0 12px;min-height:34px;font-size:12.5px;margin:0">
+            <span class="tool-btn-icon icon--blue" style="width:22px;height:22px;border-radius:6px">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            </span>
+            Phân Tích
+          </button>
         </div>
       </header>
 
-      <!-- Scrollable content -->
-      <div class="content-scroll">
-
-        <!-- API Settings -->
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Cài Đặt API</h2>
-            <span class="badge">Khóa Người Dùng</span>
+      <!-- Chat body -->
+      <div class="chat-body" id="chatBody">
+        <!-- Welcome screen -->
+        <div class="welcome-screen" id="welcomeScreen">
+          <div class="welcome-icon">
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+            </svg>
           </div>
-          <div class="form-grid">
-            <label>Khóa API ChatGPT
-              <input id="apiKey" type="password" autocomplete="off" placeholder="sk-…" />
-            </label>
-            <label>Mô Hình
-              <input id="modelName" value="gpt-4.1-mini" />
-            </label>
-          </div>
-          <label class="remember-row">
-            <input id="rememberKey" type="checkbox" /> Ghi nhớ khóa trong trình duyệt này
-          </label>
-          <p class="muted-note">Khóa chỉ được gửi đến ứng dụng cục bộ này cho mỗi yêu cầu LLM và không bao giờ được lưu trữ trong cơ sở dữ liệu.</p>
-        </div>
-
-        <!-- Upload + Analyze row -->
-        <div class="cards-grid two-col">
-
-          <!-- Research Library -->
-          <div class="panel">
-            <div class="panel-head">
-              <h2>Thư Viện Nghiên Cứu</h2>
-              <span class="badge">Cơ Sở Tri Thức</span>
-            </div>
-            <form id="bookForm">
-              <div class="form-grid">
-                <label>Tiêu Đề Sách
-                  <input name="book_title" placeholder="Sách giáo khoa định giá, sách chiến lược…" />
-                </label>
-                <label>Tệp Sách
-                  <input name="book_file" type="file" accept=".pdf,.epub,.docx,.txt,.md" />
-                </label>
-              </div>
-              <button class="btn btn-primary btn-full" type="submit">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-                </svg>
-                Thêm Sách Vào RAG
-              </button>
-            </form>
-            <div class="section-divider"></div>
-            <div id="libraryCards" class="cards-grid"></div>
-          </div>
-
-          <!-- Annual Report -->
-          <div class="panel">
-            <div class="panel-head">
-              <h2>Đánh Giá Báo Cáo Thường Niên</h2>
-              <span class="badge">Phân Tích</span>
-            </div>
-            <form id="reportForm">
-              <div class="form-grid">
-                <label>Công Ty<input name="company" value="Hoa Phat Group" /></label>
-                <label>Mã CK<input name="ticker" value="HPG" /></label>
-              </div>
-              <label style="margin-bottom:14px">PDF Báo Cáo Thường Niên
-                <input name="report_file" type="file" accept=".pdf" />
-              </label>
-              <p></p>
-              <button class="btn btn-primary btn-full" type="submit">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                  <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
-                </svg>
-                Phân Tích Lợi Thế Cạnh Tranh
-              </button>
-            </form>
-          </div>
-
-        </div>
-
-        <!-- Growth Score -->
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Điểm Số Tăng Trưởng</h2>
-            <span id="runBadge" class="badge">Chưa chạy</span>
-          </div>
-          <div id="scoreGrid" class="cards-grid five-col"></div>
-        </div>
-
-        <!-- KB Report -->
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Báo Cáo Hướng Dẫn Bằng Cơ Sở Tri Thức</h2>
-            <span id="reportBadge" class="badge">Quy Tắc + Báo Cáo TN</span>
-          </div>
-          <div id="kbReportPanel" class="cards-grid two-col"></div>
-        </div>
-
-        <!-- Competitive Advantage -->
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Lợi Thế Cạnh Tranh</h2>
-            <span id="moatBadge" class="badge">Đang chờ</span>
-          </div>
-          <div id="moatPanel" class="cards-grid three-col"></div>
-        </div>
-
-        <!-- SWOT -->
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Tình Hình Công Ty</h2>
-            <span class="badge">SWOT</span>
-          </div>
-          <div id="situationGrid" class="cards-grid four-col"></div>
-        </div>
-
-        <!-- Growth Actions -->
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Những Gì Cần Làm Để Tăng Trưởng</h2>
-            <span class="badge">Hành Động</span>
-          </div>
-          <div id="actionsPanel" class="cards-grid two-col"></div>
-        </div>
-
-        <!-- Retrieved Evidence -->
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Bằng Chứng Đã Truy Xuất</h2>
-            <span class="badge">Trích Dẫn</span>
-          </div>
-          <div id="citationGrid" class="cards-grid two-col"></div>
-        </div>
-
-        <!-- Q&A Chat -->
-        <div class="panel">
-          <div class="panel-head">
-            <h2>Hỏi Để Biết Thêm Chi Tiết</h2>
-            <span id="llmBadge" class="badge">RAG Chat</span>
-          </div>
-
-          <!-- Starter cards -->
-          <div class="starter-cards" id="starterCards" style="margin-bottom:16px">
+          <h2 class="welcome-title">Chatbot Phân Tích Định Giá RAG</h2>
+          <p class="welcome-desc">
+            Tải sách lên để xây dựng cơ sở tri thức, phân tích báo cáo thường niên, rồi hỏi bất kỳ câu hỏi nào về lợi thế cạnh tranh và định giá.
+          </p>
+          <div class="starter-cards">
             <button class="starter-card" data-prompt="Lợi thế cạnh tranh chính của công ty là gì và nó bền vững ra sao?">
               <div class="starter-card-icon">🏰</div>
-              <div class="starter-card-text">
+              <div>
                 <span class="starter-card-title">Độ Bền Vững Lợi Thế</span>
                 <span class="starter-card-desc">Lợi thế cạnh tranh bền vững đến mức nào?</span>
               </div>
             </button>
             <button class="starter-card" data-prompt="Các động lực tăng trưởng chính và ưu tiên phân bổ vốn là gì?">
               <div class="starter-card-icon">🚀</div>
-              <div class="starter-card-text">
+              <div>
                 <span class="starter-card-title">Động Lực Tăng Trưởng</span>
-                <span class="starter-card-desc">Đòn bẩy tăng trưởng chính và ưu tiên capex</span>
+                <span class="starter-card-desc">Đòn bẩy tăng trưởng và ưu tiên capex</span>
               </div>
             </button>
             <button class="starter-card" data-prompt="Những rủi ro chính nào có thể làm giảm ROIC qua chu kỳ?">
               <div class="starter-card-icon">⚠️</div>
-              <div class="starter-card-text">
+              <div>
                 <span class="starter-card-title">Đánh Giá Rủi Ro</span>
                 <span class="starter-card-desc">Các rủi ro có thể làm giảm lợi nhuận</span>
               </div>
             </button>
             <button class="starter-card" data-prompt="Phương pháp định giá nào phù hợp nhất và tại sao?">
               <div class="starter-card-icon">📊</div>
-              <div class="starter-card-text">
+              <div>
                 <span class="starter-card-title">Phương Pháp Định Giá</span>
                 <span class="starter-card-desc">DCF, so sánh hay giao dịch tiền lệ?</span>
               </div>
             </button>
           </div>
-
-          <!-- Chat messages -->
-          <div class="chat-messages" id="chatMessages" style="min-height:120px;max-height:460px;overflow-y:auto;padding:0;margin-bottom:12px">
-            <div class="messages-list" id="messagesList"></div>
-          </div>
-
-          <!-- Typing indicator anchor -->
-          <div id="typingAnchor"></div>
-
-          <!-- Input -->
-          <form id="askForm">
-            <div class="inline-chat-row">
-              <div class="input-box" id="inputBox">
-                <textarea
-                  id="userInput"
-                  name="question"
-                  class="input-textarea"
-                  placeholder="Hỏi về độ bền vững lợi thế, lộ trình tăng trưởng, hàm ý định giá…"
-                  rows="1"
-                  aria-label="Nhập câu hỏi"
-                ></textarea>
-                <div class="input-actions">
-                  <button class="send-btn" id="sendButton" type="submit" aria-label="Gửi" disabled>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                      <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
-                    </svg>
-                  </button>
-                </div>
-              </div>
-            </div>
-            <p class="input-hint" style="margin-top:8px">Nhấn <kbd>Enter</kbd> để gửi · <kbd>Shift+Enter</kbd> để xuống dòng</p>
-          </form>
-
-          <div id="answerPanel" class="cards-grid" style="margin-top:14px"></div>
         </div>
 
-      </div><!-- /content-scroll -->
+        <!-- Messages -->
+        <div class="messages-list" id="messagesList"></div>
+      </div><!-- /chat-body -->
+
+      <!-- Typing anchor -->
+      <div id="typingAnchor" style="padding:0 20px;max-width:820px;margin:0 auto;width:100%"></div>
+
+      <!-- Input -->
+      <div class="chat-input-area">
+        <div class="input-wrapper">
+          <div class="input-box" id="inputBox">
+            <textarea
+              id="userInput"
+              class="input-textarea"
+              placeholder="Hỏi về lợi thế cạnh tranh, rủi ro, định giá…"
+              rows="1"
+              aria-label="Nhập câu hỏi"
+            ></textarea>
+            <button class="send-btn" id="sendButton" type="button" aria-label="Gửi" disabled>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+              </svg>
+            </button>
+          </div>
+          <p class="input-hint">Nhấn <kbd>Enter</kbd> để gửi · <kbd>Shift+Enter</kbd> để xuống dòng</p>
+        </div>
+      </div>
     </main>
   </div>
 
+  <!-- ── MODAL: Upload Book ── -->
+  <div class="modal-backdrop" id="bookModal">
+    <div class="modal">
+      <p class="modal-title">Thêm Sách Vào Thư Viện RAG</p>
+      <p class="modal-subtitle">Hỗ trợ PDF, EPUB, DOCX, TXT, MD</p>
+      <div>
+        <label class="field-label">Tiêu Đề Sách</label>
+        <input id="bookTitle" class="field-input" placeholder="Sách giáo khoa định giá, sách chiến lược…" />
+      </div>
+      <div>
+        <label class="field-label">Tệp Sách</label>
+        <input id="bookFile" class="field-input" type="file" accept=".pdf,.epub,.docx,.txt,.md" style="cursor:pointer;color:var(--text-secondary)" />
+      </div>
+      <div class="modal-actions">
+        <button class="btn-cancel" id="bookModalClose">Hủy</button>
+        <button class="btn-submit" id="bookSubmit">Thêm Vào RAG</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── MODAL: Analyze Report ── -->
+  <div class="modal-backdrop" id="reportModal">
+    <div class="modal">
+      <p class="modal-title">Phân Tích Báo Cáo Thường Niên</p>
+      <p class="modal-subtitle">Đánh giá lợi thế cạnh tranh, điểm số tăng trưởng và SWOT</p>
+      <div class="row-2">
+        <div>
+          <label class="field-label">Công Ty</label>
+          <input id="reportCompany" class="field-input" value="Hoa Phat Group" />
+        </div>
+        <div>
+          <label class="field-label">Mã CK</label>
+          <input id="reportTicker" class="field-input" value="HPG" />
+        </div>
+      </div>
+      <div>
+        <label class="field-label">File PDF Báo Cáo</label>
+        <input id="reportFile" class="field-input" type="file" accept=".pdf" style="cursor:pointer;color:var(--text-secondary)" />
+      </div>
+      <div class="modal-actions">
+        <button class="btn-cancel" id="reportModalClose">Hủy</button>
+        <button class="btn-submit" id="reportSubmit">Phân Tích</button>
+      </div>
+    </div>
+  </div>
+
   <script>
-    /* =========================================================
-       app.js — Valuation RAG UI (inline)
-       Real API calls to the Python backend.
-    ========================================================= */
+  /* ====================================================
+     app.js — Valuation RAG Chatbot (Flask backend)
+  ==================================================== */
 
-    // ── DOM ──────────────────────────────────────────────────
-    const $ = (id) => document.getElementById(id);
-    const safe = (v) => String(v ?? '').replace(/[&<>"']/g, c =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const $ = id => document.getElementById(id);
+  const safe = v => String(v ?? '').replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-    const userInput   = $('userInput');
-    const sendButton  = $('sendButton');
-    const messagesList = $('messagesList');
-    const chatMessages = $('chatMessages');
+  let isSending = false;
+  let typingEl  = null;
 
-    let isSending = false;
+  // ── API helpers ────────────────────────────────────
+  function apiKey()   { return $('apiKey').value.trim(); }
+  function apiModel() { return $('modelName').value.trim() || 'gpt-4.1-mini'; }
 
-    // ── API Helpers ───────────────────────────────────────────
-    function apiSettings() {
-      return {
-        api_key: $('apiKey').value.trim(),
-        model: $('modelName').value.trim() || 'gpt-4.1-mini'
-      };
-    }
+  function loadSettings() {
+    const k = localStorage.getItem('rag_api_key') || '';
+    const m = localStorage.getItem('rag_model') || '';
+    if (k) { $('apiKey').value = k; $('rememberKey').checked = true; }
+    if (m)   $('modelName').value = m;
+  }
+  function saveSettings() {
+    if ($('rememberKey').checked) localStorage.setItem('rag_api_key', apiKey());
+    else localStorage.removeItem('rag_api_key');
+    localStorage.setItem('rag_model', apiModel());
+  }
 
-    function loadApiSettings() {
-      const saved = localStorage.getItem('valuation_rag_api_key') || '';
-      const savedModel = localStorage.getItem('valuation_rag_model') || '';
-      if (saved) { $('apiKey').value = saved; $('rememberKey').checked = true; }
-      if (savedModel) { $('modelName').value = savedModel; }
-    }
+  function setStatus(txt) { $('statusText').textContent = txt; }
 
-    function saveApiSettings() {
-      if ($('rememberKey').checked) {
-        localStorage.setItem('valuation_rag_api_key', $('apiKey').value.trim());
-      } else {
-        localStorage.removeItem('valuation_rag_api_key');
-      }
-      localStorage.setItem('valuation_rag_model', $('modelName').value.trim() || 'gpt-4.1-mini');
-    }
+  async function readJson(res) {
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || 'Request failed');
+    return d;
+  }
 
-    function setStatus(text) { $('statusText').textContent = text; }
+  // ── API key dot indicator ──────────────────────────
+  function setKeyDot(state) { // '' | 'ok' | 'err'
+    const dot = $('apiKeyDot');
+    dot.className = 'api-key-dot' + (state ? ' ' + state : '');
+  }
 
-    async function readJson(response) {
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Request failed');
-      return data;
-    }
-
-    // ── Test API Key ─────────────────────────────────────────
-    async function testApiKey() {
-      saveApiSettings();
-      const settings = apiSettings();
-      if (!settings.api_key) { showError(new Error('Vui lòng dán khóa API ChatGPT của bạn trước.')); return; }
-      setStatus('Đang kiểm tra API key…');
-      const result = await fetch('/api/test-key', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(settings)
-      }).then(readJson);
-      setStatus(result.ok ? 'API key hoạt động tốt' : 'API key cần kiểm tra lại');
-      alert(result.message);
-    }
-
-    // ── Library ───────────────────────────────────────────────
-    async function loadLibrary() {
+  // ── Library ────────────────────────────────────────
+  async function loadLibrary() {
+    try {
       const data = await fetch('/api/library').then(readJson);
-      renderLibrary(data);
-    }
-
-    function renderLibrary(data) {
+      $('libCount').textContent = data.documents;
       const docs = data.recent_documents || [];
-
-      // Sidebar mini-stats
-      $('sidebarLibrary').innerHTML = `
-        <div class="lib-doc-card">
-          <div class="doc-icon doc-icon--green">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="3" y="3" width="18" height="18" rx="2"/></svg>
-          </div>
-          <div class="doc-info">
-            <span class="doc-name">${data.documents} tài liệu</span>
-            <span class="doc-meta">${data.chunks} đoạn · ${data.pages} trang</span>
-          </div>
-          <div class="doc-status"></div>
-        </div>
-      `;
-
-      // Main panel cards
-      $('libraryCards').innerHTML = docs.map(doc => `
-        <div class="data-card">
-          <span class="data-card-label">${safe(doc.source_type)}</span>
-          <strong style="font-size:13px;color:var(--text-primary)">${safe(doc.title)}</strong>
-          <p>${doc.page_count} pages · ${doc.chunk_count} chunks</p>
-        </div>
-      `).join('') || '<p class="muted-note">Chưa có tài liệu nào. Thêm một cuốn sách để bắt đầu.</p>';
+      $('sidebarDocs').innerHTML = docs.length
+        ? docs.map(d => `
+            <div class="lib-item">
+              <span class="lib-dot lib-dot--${d.source_type === 'book' ? 'book' : 'report'}"></span>
+              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${safe(d.title)}</span>
+              <span style="flex-shrink:0;font-size:10.5px;color:var(--text-muted)">${d.page_count}tr</span>
+            </div>`).join('')
+        : '<p style="font-size:11.5px;color:var(--text-muted);padding:0 4px">Chưa có tài liệu</p>';
+    } catch(e) {
+      $('sidebarDocs').innerHTML = `<p style="font-size:11.5px;color:#f87171;padding:0 4px">${safe(e.message)}</p>`;
     }
+  }
 
-    // ── Upload Book ───────────────────────────────────────────
-    async function uploadBook(event) {
-      event.preventDefault();
-      setStatus('Đang thêm sách…');
-      const result = await fetch('/api/upload-book', {
-        method: 'POST',
-        body: new FormData(event.currentTarget)
-      }).then(readJson);
-      setStatus(result.inserted ? 'Đã thêm sách ✓' : 'Sách đã có trong cơ sở dữ liệu');
-      await loadLibrary();
-    }
+  // ── Welcome screen ─────────────────────────────────
+  function setWelcome(visible) {
+    $('welcomeScreen').style.display = visible ? 'flex' : 'none';
+  }
 
-    // ── Analyze Report ────────────────────────────────────────
-    async function analyzeReport(event) {
-      event.preventDefault();
-      setStatus('Đang phân tích báo cáo thường niên…');
-      const formData = new FormData(event.currentTarget);
-      const settings = apiSettings();
-      formData.append('api_key', settings.api_key);
-      formData.append('model', settings.model);
-      saveApiSettings();
-      const result = await fetch('/api/analyze-report', {
-        method: 'POST',
-        body: formData
-      }).then(readJson);
-      renderAnalysis(result);
-      setStatus('Phân tích đã sẵn sàng ✓');
-      await loadLibrary();
-    }
+  // ── Message rendering ──────────────────────────────
+  function appendMessage(role, html, sources = []) {
+    setWelcome(false);
+    const now = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    const wrap = document.createElement('div');
+    wrap.className = `message message--${role}`;
 
-    // ── Render Analysis ───────────────────────────────────────
-    function renderAnalysis(data) {
-      renderKbReport(data);
+    const av = document.createElement('div');
+    av.className = 'message-avatar';
+    av.textContent = role === 'user' ? 'U' : 'AI';
 
-      $('runBadge').textContent = data.project.created_at;
-      $('moatBadge').textContent = data.competitive_advantage.rating;
+    const cont = document.createElement('div');
+    cont.className = 'message-content';
 
-      const s = data.scores;
-      $('scoreGrid').innerHTML = [
-        ['Tăng Trưởng Tổng Thể', s.overall_growth_score],
-        ['Lợi Thế Cạnh Tranh',           s.moat_sustainability],
-        ['Năng Lực Tăng Trưởng',    s.growth_capacity],
-        ['Chất Lượng Thực Thi',      s.execution_quality],
-        ['Sức Bền Tài Chính',s.financial_resilience]
-      ].map(([label, value]) => `
-        <div class="score-card">
-          <span class="score-card-label">${safe(label)}</span>
-          <span class="score-card-value">${value}<small style="font-size:13px;font-weight:400">/100</small></span>
-        </div>
-      `).join('');
+    const bub = document.createElement('div');
+    bub.className = 'message-bubble';
+    bub.innerHTML = html;
 
-      $('moatPanel').innerHTML = `
-        <div class="data-card">
-          <span class="data-card-label">Đánh Giá</span>
-          <strong style="font-size:14px;color:var(--text-primary)">Lợi thế cạnh tranh: ${safe(data.competitive_advantage.rating)}</strong>
-          <p>${safe(data.competitive_advantage.assessment)}</p>
-        </div>
-        <div class="data-card">
-          <span class="data-card-label">Tín Hiệu</span>
-          <p>${safe((data.competitive_advantage.signals || []).join(', ') || 'Không phát hiện tín hiệu lợi thế cạnh tranh mạnh')}</p>
-        </div>
-        <div class="data-card">
-          <span class="data-card-label">Mối Lo Ngại</span>
-          <p>${safe((data.competitive_advantage.concerns || []).join(', ') || 'Không phát hiện mối lo ngại lớn')}</p>
-        </div>
-      `;
+    const meta = document.createElement('div');
+    meta.className = 'message-meta';
+    meta.textContent = now;
 
-      const sit = data.company_situation;
-      $('situationGrid').innerHTML = [
-        ['swot-good', 'Điểm Mạnh',     sit.strengths],
-        ['swot-bad',  'Điểm Yếu',    sit.weaknesses],
-        ['swot-opp',  'Cơ Hội', sit.opportunities],
-        ['swot-risk', 'Thách Thức',       sit.threats]
-      ].map(([cls, title, items]) => `
-        <div class="data-card ${cls}">
-          <strong style="display:block;margin-bottom:8px;font-size:13px">${title}</strong>
-          <ul class="plain-list">
-            ${(items || []).map(item => `<li>${safe(item)}</li>`).join('')}
-          </ul>
-        </div>
-      `).join('');
+    cont.appendChild(bub);
 
-      $('actionsPanel').innerHTML = (data.growth_actions || []).map((item, i) => `
-        <div class="data-card">
-          <span class="data-card-label">Hành động ${i + 1}</span>
-          <p style="margin:0;font-size:12.5px;color:var(--text-secondary)">${safe(item)}</p>
-        </div>
-      `).join('');
-
-      const knowledge = (data.citations.knowledge || []).map(c => ({ ...c, kind: 'Kiến Thức' }));
-      const report    = (data.citations.annual_report || []).map(c => ({ ...c, kind: 'Báo Cáo Thường Niên' }));
-      $('citationGrid').innerHTML = knowledge.concat(report).map(c => `
-        <div class="citation-card">
-          <span class="citation-card-label">${safe(c.kind)}${c.page_start ? ' · trang ' + c.page_start : ''}</span>
-          <strong>${safe(c.title || 'Báo cáo thường niên')}</strong>
-          <p>${safe(c.snippet)}</p>
-        </div>
-      `).join('') || '<p class="muted-note">Chưa có trích dẫn nào. Thêm sách và phân tích một báo cáo.</p>';
-    }
-
-    function renderKbReport(data) {
-      const report = data.llm_report;
-      if (!report) {
-        $('kbReportPanel').innerHTML = `<div class="data-card" style="grid-column:1/-1"><span class="data-card-label">Không có API key</span><p>Thêm khóa API ChatGPT của bạn, sau đó chạy phân tích báo cáo thường niên để tạo báo cáo hướng dẫn bằng cơ sở tri thức.</p></div>`;
-        return;
-      }
-      $('reportBadge').textContent = report.mode === 'llm' ? 'LLM + KB' : 'Bằng chứng KB';
-      const sections = report.sections || {};
-      const cards = [
-        ['Báo Cáo Định Tính',     sections.qualitative_report],
-        ['Báo Cáo Định Lượng',    sections.quantitative_report],
-        ['Quy Tắc Phương Pháp Định Giá', sections.valuation_method_rules],
-        ['Định Dạng Mô Hình Excel',     sections.excel_model_format],
-        ['Các Bước Tiếp Theo Được Đề Xuất', sections.recommended_next_steps]
-      ];
-      $('kbReportPanel').innerHTML = cards.map(([title, body]) => `
-        <div class="data-card">
-          <span class="data-card-label">${safe(title)}</span>
-          <p class="answer-text">${safe(body || 'Chưa được tạo.')}</p>
-        </div>
-      `).join('');
-    }
-
-    // ── Chat & Q&A ────────────────────────────────────────────
-    function autoResize() {
-      userInput.style.height = 'auto';
-      userInput.style.height = Math.min(userInput.scrollHeight, 180) + 'px';
-    }
-
-    function updateSendBtn() {
-      sendButton.disabled = !userInput.value.trim() || isSending;
-    }
-
-    function appendMessage(role, text, sources = []) {
-      const now = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      const wrapper = document.createElement('div');
-      wrapper.className = `message message--${role}`;
-
-      const avatar = document.createElement('div');
-      avatar.className = 'message-avatar';
-      avatar.textContent = role === 'user' ? 'U' : 'AI';
-
-      const content = document.createElement('div');
-      content.className = 'message-content';
-
-      const bubble = document.createElement('div');
-      bubble.className = 'message-bubble';
-      bubble.innerHTML = safe(text).replace(/\n/g, '<br>');
-
-      const meta = document.createElement('div');
-      meta.className = 'message-meta';
-      meta.textContent = now;
-
-      content.appendChild(bubble);
-
-      if (role === 'bot' && sources.length > 0) {
-        const sourcesEl = document.createElement('div');
-        sourcesEl.className = 'message-sources';
-        sources.forEach(src => {
-          const tag = document.createElement('span');
-          tag.className = 'source-tag';
-          tag.textContent = src;
-          sourcesEl.appendChild(tag);
-        });
-        content.appendChild(sourcesEl);
-      }
-
-      content.appendChild(meta);
-      wrapper.appendChild(avatar);
-      wrapper.appendChild(content);
-      messagesList.appendChild(wrapper);
-      chatMessages.scrollTo({ top: chatMessages.scrollHeight, behavior: 'smooth' });
-    }
-
-    let typingEl = null;
-    function showTyping() {
-      if (typingEl) return;
-      typingEl = document.createElement('div');
-      typingEl.className = 'typing-indicator';
-      typingEl.style.padding = '8px 0';
-      const bubble = document.createElement('div');
-      bubble.className = 'typing-bubble';
-      for (let i = 0; i < 3; i++) {
-        const dot = document.createElement('span');
-        dot.className = 'typing-dot';
-        bubble.appendChild(dot);
-      }
-      typingEl.appendChild(bubble);
-      $('typingAnchor').appendChild(typingEl);
-      chatMessages.scrollTo({ top: chatMessages.scrollHeight, behavior: 'smooth' });
-    }
-    function hideTyping() {
-      if (typingEl) { typingEl.remove(); typingEl = null; }
-    }
-
-    async function askQuestion(question) {
-      if (!question || isSending) return;
-      appendMessage('user', question);
-      isSending = true;
-      updateSendBtn();
-      showTyping();
-      saveApiSettings();
-
-      try {
-        setStatus('Đang truy xuất bằng chứng…');
-        const result = await fetch('/api/ask', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question, ...apiSettings() })
-        }).then(readJson);
-
-        hideTyping();
-        const sources = (result.citations || []).map(c => c.title || 'Nguồn');
-        appendMessage('bot', result.answer, sources);
-
-        $('llmBadge').textContent = result.mode === 'llm' ? 'LLM + RAG' : 'Bằng chứng RAG';
-        setStatus(result.mode === 'llm' ? 'Câu trả lời LLM đã sẵn sàng ✓' : 'Câu trả lời bằng chứng đã sẵn sàng ✓');
-
-        // Also render full citation cards
-        const cites = (result.citations || []).map((c, i) => `
-          <div class="citation-card">
-            <span class="citation-card-label">${safe(c.source_type || 'nguồn')}${c.page_start ? ' · trang ' + c.page_start : ''}</span>
-            <strong>[${i + 1}] ${safe(c.title || 'Nguồn')}</strong>
-            <p>${safe(c.snippet)}</p>
-          </div>
-        `).join('');
-        $('answerPanel').innerHTML = cites || '<p class="muted-note">Không tìm thấy bằng chứng phù hợp.</p>';
-
-      } catch (err) {
-        hideTyping();
-        appendMessage('bot', 'Lỗi: ' + err.message);
-        setStatus('Lỗi — kiểm tra console');
-      }
-
-      isSending = false;
-      updateSendBtn();
-    }
-
-    // ── Event Wiring ─────────────────────────────────────────
-    $('bookForm').addEventListener('submit',   e => uploadBook(e).catch(showError));
-    $('reportForm').addEventListener('submit', e => analyzeReport(e).catch(showError));
-    $('testKeyButton').addEventListener('click', () => testApiKey().catch(showError));
-    $('refreshButton').addEventListener('click', () => loadLibrary().catch(showError));
-
-    $('askForm').addEventListener('submit', e => {
-      e.preventDefault();
-      const q = userInput.value.trim();
-      if (!q) return;
-      userInput.value = '';
-      userInput.style.height = 'auto';
-      updateSendBtn();
-      askQuestion(q);
-    });
-
-    userInput.addEventListener('input', () => { autoResize(); updateSendBtn(); });
-    userInput.addEventListener('keydown', e => {
-      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('askForm').requestSubmit(); }
-    });
-
-    // Starter cards
-    document.querySelectorAll('.starter-card').forEach(card => {
-      card.addEventListener('click', () => {
-        const prompt = card.dataset.prompt;
-        if (prompt) {
-          userInput.value = prompt;
-          autoResize();
-          updateSendBtn();
-          $('askForm').requestSubmit();
-        }
+    if (role === 'bot' && sources.length) {
+      const src = document.createElement('div');
+      src.className = 'message-sources';
+      sources.forEach(s => {
+        const t = document.createElement('span');
+        t.className = 'source-tag';
+        t.textContent = s;
+        src.appendChild(t);
       });
-    });
-
-    // Mobile sidebar
-    $('menuBtn').addEventListener('click', () => {
-      $('sidebar').classList.add('open');
-      $('sidebarOverlay').classList.add('open');
-      document.body.style.overflow = 'hidden';
-    });
-    function closeSidebar() {
-      $('sidebar').classList.remove('open');
-      $('sidebarOverlay').classList.remove('open');
-      document.body.style.overflow = '';
-    }
-    $('sidebarCloseBtn').addEventListener('click', closeSidebar);
-    $('sidebarOverlay').addEventListener('click', closeSidebar);
-
-    function showError(err) {
-      setStatus('Lỗi — cần kiểm tra lại');
-      alert(err.message || String(err));
+      cont.appendChild(src);
     }
 
-    // ── Init ──────────────────────────────────────────────────
-    loadApiSettings();
+    cont.appendChild(meta);
+    wrap.appendChild(av);
+    wrap.appendChild(cont);
+    $('messagesList').appendChild(wrap);
+    scrollBottom();
+  }
+
+  function appendUserMessage(text) {
+    appendMessage('user', safe(text).replace(/\n/g,'<br>'));
+  }
+
+  function appendBotText(text, sources = []) {
+    appendMessage('bot', safe(text).replace(/\n/g,'<br>'), sources);
+  }
+
+  function appendBotHtml(html, sources = []) {
+    appendMessage('bot', html, sources);
+  }
+
+  function scrollBottom() {
+    const body = $('chatBody');
+    body.scrollTo({top: body.scrollHeight, behavior: 'smooth'});
+  }
+
+  // ── Typing indicator ───────────────────────────────
+  function showTyping() {
+    if (typingEl) return;
+    typingEl = document.createElement('div');
+    typingEl.className = 'typing-indicator';
+
+    const av = document.createElement('div');
+    av.className = 'message-avatar';
+    av.style.cssText = 'width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;margin-top:4px;background:linear-gradient(135deg,#6366f1,#a855f7);color:#fff';
+    av.textContent = 'AI';
+
+    const bub = document.createElement('div');
+    bub.className = 'typing-bubble';
+    for (let i=0;i<3;i++) {
+      const d = document.createElement('span');
+      d.className = 'typing-dot';
+      bub.appendChild(d);
+    }
+
+    typingEl.appendChild(av);
+    typingEl.appendChild(bub);
+    $('typingAnchor').appendChild(typingEl);
+    scrollBottom();
+  }
+
+  function hideTyping() {
+    if (typingEl) { typingEl.remove(); typingEl = null; }
+  }
+
+  // ── Send question ──────────────────────────────────
+  async function sendQuestion(question) {
+    if (!question || isSending) return;
+    appendUserMessage(question);
+    isSending = true; updateSendBtn();
+    showTyping();
+    saveSettings();
+
+    try {
+      setStatus('Đang truy xuất bằng chứng…');
+      const result = await fetch('/api/ask', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({question, api_key: apiKey(), model: apiModel()})
+      }).then(readJson);
+
+      hideTyping();
+      const sources = (result.citations || []).map(c => c.title || 'Nguồn');
+      appendBotText(result.answer, sources);
+      setStatus(result.mode === 'llm' ? 'Câu trả lời LLM ✓' : 'Câu trả lời bằng chứng ✓');
+    } catch(err) {
+      hideTyping();
+      appendBotText('Lỗi: ' + err.message);
+      setStatus('Lỗi');
+    }
+
+    isSending = false; updateSendBtn();
+  }
+
+  // ── Upload book ────────────────────────────────────
+  async function submitBook() {
+    const file = $('bookFile').files[0];
+    if (!file) { alert('Vui lòng chọn tệp sách.'); return; }
+    closeModal('bookModal');
+    appendBotHtml(`<span style="color:var(--text-muted)">⏳ Đang thêm sách <strong>${safe(file.name)}</strong> vào RAG…</span>`);
+    setStatus('Đang thêm sách…');
+
+    const fd = new FormData();
+    fd.append('book_file', file);
+    fd.append('book_title', $('bookTitle').value.trim() || file.name.replace(/\.[^.]+$/,''));
+
+    try {
+      const result = await fetch('/api/upload-book', {method:'POST', body:fd}).then(readJson);
+      const msg = result.inserted
+        ? `✅ Đã thêm sách **${safe(result.title)}** — ${result.page_count} trang, ${result.chunk_count} đoạn.`
+        : `ℹ️ Sách **${safe(result.title)}** đã có trong thư viện (${result.chunk_count} đoạn).`;
+      appendBotText(msg);
+      setStatus('Đã thêm sách ✓');
+      await loadLibrary();
+    } catch(err) {
+      appendBotText('Lỗi khi thêm sách: ' + err.message);
+      setStatus('Lỗi');
+    }
+  }
+
+  // ── Analyze report ─────────────────────────────────
+  async function submitReport() {
+    const file = $('reportFile').files[0];
+    if (!file) { alert('Vui lòng chọn file PDF báo cáo.'); return; }
+    const company = $('reportCompany').value.trim() || 'Công ty';
+    const ticker  = $('reportTicker').value.trim()  || 'N/A';
+    closeModal('reportModal');
+
+    appendBotHtml(`<span style="color:var(--text-muted)">⏳ Đang phân tích báo cáo của <strong>${safe(company)} (${safe(ticker)})</strong>…</span>`);
+    setStatus('Đang phân tích…');
+    saveSettings();
+
+    const fd = new FormData();
+    fd.append('report_file', file);
+    fd.append('company', company);
+    fd.append('ticker', ticker);
+    fd.append('api_key', apiKey());
+    fd.append('model', apiModel());
+
+    try {
+      const r = await fetch('/api/analyze-report', {method:'POST', body:fd}).then(readJson);
+      renderAnalysis(r, company, ticker);
+      setStatus('Phân tích hoàn tất ✓');
+      await loadLibrary();
+    } catch(err) {
+      appendBotText('Lỗi khi phân tích: ' + err.message);
+      setStatus('Lỗi');
+    }
+  }
+
+  function renderAnalysis(r, company, ticker) {
+    const s = r.scores || {};
+    const adv = r.competitive_advantage || {};
+    const sit = r.company_situation || {};
+    const actions = r.growth_actions || [];
+    const lrep = r.llm_report;
+
+    // Score chips
+    const scoreHtml = [
+      ['Tổng Thể', s.overall_growth_score],
+      ['Lợi Thế', s.moat_sustainability],
+      ['Tăng Trưởng', s.growth_capacity],
+      ['Thực Thi', s.execution_quality],
+      ['Tài Chính', s.financial_resilience],
+    ].map(([l,v]) => `<span class="score-chip">${safe(l)}: <strong>${v}/100</strong></span>`).join('');
+
+    // SWOT
+    const swotColor = {Điểm_Mạnh:'#34d399',Điểm_Yếu:'#f87171',Cơ_Hội:'#818cf8',Thách_Thức:'#fbbf24'};
+    const swotHtml = [
+      ['Điểm_Mạnh','Điểm Mạnh',sit.strengths],
+      ['Điểm_Yếu','Điểm Yếu',sit.weaknesses],
+      ['Cơ_Hội','Cơ Hội',sit.opportunities],
+      ['Thách_Thức','Thách Thức',sit.threats],
+    ].map(([key,label,items]) => `
+      <div class="result-section">
+        <div class="result-section-title" style="color:${swotColor[key]}">${label}</div>
+        <ul>${(items||[]).map(i=>`<li>${safe(i)}</li>`).join('')||'<li>—</li>'}</ul>
+      </div>`).join('');
+
+    // Actions
+    const actHtml = actions.length
+      ? '<ol style="margin:4px 0 0 16px">' + actions.map(a=>`<li>${safe(a)}</li>`).join('') + '</ol>'
+      : '<p style="color:var(--text-muted)">Không có hành động</p>';
+
+    // LLM report sections
+    let repHtml = '';
+    if (lrep && lrep.sections) {
+      const sec = lrep.sections;
+      const titles = [
+        ['qualitative_report','Báo Cáo Định Tính'],
+        ['quantitative_report','Báo Cáo Định Lượng'],
+        ['valuation_method_rules','Quy Tắc Định Giá'],
+        ['excel_model_format','Mô Hình Excel'],
+        ['recommended_next_steps','Bước Tiếp Theo'],
+      ];
+      repHtml = `<div class="result-section"><div class="result-section-title">Báo Cáo KB (${safe(lrep.mode_label||'')})</div>`
+        + titles.map(([k,l])=> sec[k]
+          ? `<div style="margin-bottom:10px"><span style="font-size:11.5px;font-weight:600;color:var(--text-primary)">${l}</span><p style="margin:4px 0 0;font-size:12.5px;color:var(--text-secondary);line-height:1.6">${safe(sec[k])}</p></div>`
+          : '').join('')
+        + '</div>';
+    }
+
+    const html = `
+      <div class="result-card">
+        <h4>📊 Phân Tích: ${safe(company)} (${safe(ticker)})</h4>
+        <div class="score-row">${scoreHtml}</div>
+        <div class="result-section">
+          <div class="result-section-title">Lợi Thế Cạnh Tranh</div>
+          <p><strong>${safe(adv.rating||'')}</strong> — ${safe(adv.assessment||'')}</p>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">
+          ${swotHtml}
+        </div>
+        <div class="result-section" style="margin-top:12px">
+          <div class="result-section-title">Hành Động Tăng Trưởng</div>
+          ${actHtml}
+        </div>
+        ${repHtml}
+      </div>`;
+
+    appendBotHtml(html);
+    appendBotText(`Phân tích **${company}** hoàn tất. Bạn có thể hỏi tôi bất kỳ câu hỏi nào về báo cáo này.`);
+  }
+
+  // ── Test API key ───────────────────────────────────
+  async function testKey() {
+    saveSettings();
+    if (!apiKey()) { alert('Vui lòng dán khóa API trước.'); return; }
+    setStatus('Đang kiểm tra…');
+    setKeyDot('');
+    try {
+      const r = await fetch('/api/test-key', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({api_key: apiKey(), model: apiModel()})
+      }).then(readJson);
+      setKeyDot(r.ok ? 'ok' : 'err');
+      setStatus(r.ok ? 'API key hợp lệ ✓' : 'API key lỗi');
+      alert(r.message);
+    } catch(e) {
+      setKeyDot('err');
+      setStatus('Lỗi kiểm tra key');
+      alert(e.message);
+    }
+  }
+
+  // ── Input helpers ──────────────────────────────────
+  function autoResize() {
+    const t = $('userInput');
+    t.style.height = 'auto';
+    t.style.height = Math.min(t.scrollHeight, 180) + 'px';
+  }
+  function updateSendBtn() {
+    $('sendButton').disabled = !$('userInput').value.trim() || isSending;
+  }
+
+  // ── Modal helpers ──────────────────────────────────
+  function openModal(id)  { $(id).classList.add('open'); }
+  function closeModal(id) { $(id).classList.remove('open'); }
+
+  // ── Sidebar ────────────────────────────────────────
+  function openSidebar() {
+    $('sidebar').classList.add('open');
+    $('sidebarOverlay').classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeSidebar() {
+    $('sidebar').classList.remove('open');
+    $('sidebarOverlay').classList.remove('open');
+    document.body.style.overflow = '';
+  }
+
+  // ── Clear chat ─────────────────────────────────────
+  function clearChat() {
+    $('messagesList').innerHTML = '';
+    setWelcome(true);
+  }
+
+  // ── Event wiring ───────────────────────────────────
+  $('sendButton').addEventListener('click', () => {
+    const q = $('userInput').value.trim();
+    if (!q) return;
+    $('userInput').value = '';
+    $('userInput').style.height = 'auto';
     updateSendBtn();
-    loadLibrary().catch(showError);
-  </script>
+    sendQuestion(q);
+  });
 
+  $('userInput').addEventListener('input', () => { autoResize(); updateSendBtn(); });
+  $('userInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      $('sendButton').click();
+    }
+  });
+
+  document.querySelectorAll('.starter-card').forEach(c => {
+    c.addEventListener('click', () => {
+      const p = c.dataset.prompt;
+      if (p) { $('userInput').value = p; autoResize(); updateSendBtn(); $('sendButton').click(); }
+    });
+  });
+
+  // Sidebar toggles
+  $('menuBtn').addEventListener('click', openSidebar);
+  $('sidebarCloseBtn').addEventListener('click', closeSidebar);
+  $('sidebarOverlay').addEventListener('click', closeSidebar);
+
+  // Tool buttons (sidebar + header)
+  ['openBookModal','headerUploadBook'].forEach(id => $$(id) && $(id).addEventListener('click', () => { closeSidebar(); openModal('bookModal'); }));
+  ['openReportModal','headerAnalyzeReport'].forEach(id => $$(id) && $(id).addEventListener('click', () => { closeSidebar(); openModal('reportModal'); }));
+
+  function $$(id) { return document.getElementById(id); }
+  $('openBookModal').addEventListener('click', () => { closeSidebar(); openModal('bookModal'); });
+  $('headerUploadBook').addEventListener('click', () => openModal('bookModal'));
+  $('openReportModal').addEventListener('click', () => { closeSidebar(); openModal('reportModal'); });
+  $('headerAnalyzeReport').addEventListener('click', () => openModal('reportModal'));
+  $('clearChatBtn').addEventListener('click', () => { closeSidebar(); clearChat(); });
+  $('testKeyBtn').addEventListener('click', testKey);
+  $('refreshLibBtn').addEventListener('click', () => loadLibrary().catch(console.error));
+  $('apiKey').addEventListener('change', () => setKeyDot(''));
+
+  // Modals
+  $('bookModalClose').addEventListener('click', () => closeModal('bookModal'));
+  $('bookSubmit').addEventListener('click', submitBook);
+  $('reportModalClose').addEventListener('click', () => closeModal('reportModal'));
+  $('reportSubmit').addEventListener('click', submitReport);
+
+  // Close modals on backdrop click
+  $('bookModal').addEventListener('click', e => { if (e.target === $('bookModal')) closeModal('bookModal'); });
+  $('reportModal').addEventListener('click', e => { if (e.target === $('reportModal')) closeModal('reportModal'); });
+
+  // ── Init ───────────────────────────────────────────
+  loadSettings();
+  updateSendBtn();
+  setWelcome(true);
+  loadLibrary().catch(console.error);
+  </script>
 </body>
 </html>
