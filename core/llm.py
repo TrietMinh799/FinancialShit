@@ -174,16 +174,17 @@ def answer_question(
     question: str,
     api_key: str | None = None,
     model: str | None = None,
+    base_url: str | None = None,
 ) -> dict:
     """Retrieve citations for *question* and synthesise an answer via LLM or fallback."""
-    citations = unique(store.search(question, ["book", "annual_report"], 10), 10)
+    citations = unique(store.hybrid_search(question, ["book", "annual_report"], 10), 10)
     answer: str | None = None
     mode = "rag"
     mode_label = "Evidence-based answer"
 
     if citations and (api_key or os.environ.get("OPENAI_API_KEY")):
         try:
-            answer = call_openai_llm(question, citations, api_key, model)
+            answer = call_openai_llm(question, citations, api_key, model, base_url)
             if answer:
                 mode = "llm"
                 mode_label = f"LLM answer ({model or OPENAI_MODEL})"
@@ -248,6 +249,7 @@ def generate_kb_company_report(
     ticker: str,
     api_key: str | None,
     model: str | None,
+    base_url: str | None = None,
 ) -> dict:
     """Generate a five-section knowledge-base report for *company*."""
     queries = [
@@ -264,7 +266,7 @@ def generate_kb_company_report(
     ]
     citations: list[dict] = []
     for query in queries:
-        citations.extend(store.search(query, ["book", "annual_report"], 5))
+        citations.extend(store.hybrid_search(query, ["book", "annual_report"], 5))
     citations = unique(citations, 14)
 
     prompt = (
@@ -292,7 +294,7 @@ def generate_kb_company_report(
 
     if api_key:
         try:
-            answer = call_openai_llm(prompt, citations, api_key, model)
+            answer = call_openai_llm(prompt, citations, api_key, model, base_url)
             if answer:
                 mode = "llm"
                 mode_label = f"LLM + knowledge base ({model or OPENAI_MODEL})"
@@ -319,12 +321,13 @@ def generate_kb_company_report(
 # API-key health check
 # ---------------------------------------------------------------------------
 
-def test_openai_key(api_key: str, model: str) -> bool:
-    """Return True if *api_key* can successfully call the OpenAI API."""
+def test_openai_key(api_key: str, model: str, base_url: str | None = None) -> bool:
+    """Return True if *api_key* can successfully call the configured LLM provider."""
     answer = call_openai_llm(
         "Reply with exactly: ok",
         [{"title": "Test", "source_type": "system", "snippet": "This is a connectivity test.", "page_start": None}],
         api_key,
         model,
+        base_url,
     )
     return bool(answer)

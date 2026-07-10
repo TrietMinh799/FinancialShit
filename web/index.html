@@ -135,13 +135,41 @@
     .icon--violet { background: rgba(168,85,247,.15); color: #a855f7; }
     .icon--amber  { background: rgba(251,191,36,.12); color: #fbbf24; }
 
+    /* ── Provider picker ── */
+    .provider-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .provider-btn {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 4px; padding: 8px 6px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--bg-elevated);
+      cursor: pointer; font-size: 11px; font-weight: 600;
+      color: var(--text-secondary); text-align: center;
+      transition: background .15s, border-color .15s, color .15s;
+      line-height: 1.2;
+    }
+    .provider-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+    .provider-btn.active {
+      border-color: var(--provider-color, #6366f1);
+      background: color-mix(in srgb, var(--provider-color, #6366f1) 12%, transparent);
+      color: var(--text-primary);
+      box-shadow: 0 0 0 1px color-mix(in srgb, var(--provider-color, #6366f1) 40%, transparent);
+    }
+    .provider-dot {
+      width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    }
+
     /* ── API key row in sidebar ── */
     .api-key-row {
       display: flex;
       align-items: center;
       gap: 8px;
       padding: 10px 14px;
-      margin: 10px 14px 0;
       background: var(--bg-elevated);
       border: 1px solid var(--border);
       border-radius: 10px;
@@ -165,6 +193,21 @@
     }
     .api-key-dot.ok  { background: #34d399; box-shadow: 0 0 6px #34d399; }
     .api-key-dot.err { background: #f87171; box-shadow: 0 0 6px #f87171; }
+
+    /* ── Model select ── */
+    .model-select {
+      width: 100%;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-bright);
+      border-radius: 9px;
+      padding: 7px 10px;
+      color: var(--text-primary);
+      font-size: 12.5px;
+      font-family: inherit;
+      outline: none;
+      cursor: pointer;
+    }
+    .model-select:focus { border-color: rgba(99,102,241,.5); }
 
     /* ── Welcome screen ── */
     .welcome-screen {
@@ -450,30 +493,51 @@
         </button>
       </div>
 
-      <!-- API Key -->
+      <!-- LLM Provider -->
       <div style="padding:14px 14px 0">
-        <div class="sidebar-section-title" style="margin-bottom:8px">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-          Khóa API
+        <div class="sidebar-section-title" style="margin-bottom:10px">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+          LLM Provider
         </div>
+
+        <!-- Provider grid -->
+        <div class="provider-grid" id="providerGrid">
+          <!-- populated by JS from /api/providers -->
+          <div style="grid-column:1/-1;font-size:11.5px;color:var(--text-muted)">Đang tải…</div>
+        </div>
+
+        <!-- Custom base URL (shown only for "custom" provider) -->
+        <div id="customUrlRow" style="display:none;margin-bottom:8px">
+          <label class="field-label" style="margin-bottom:4px">Base URL</label>
+          <input id="customBaseUrl" class="field-input" placeholder="http://localhost:11434/v1" style="padding:7px 10px;font-size:12.5px" />
+        </div>
+
+        <!-- Model selector -->
+        <div style="margin-bottom:8px">
+          <label class="field-label" style="margin-bottom:4px">Mô hình</label>
+          <select id="modelSelect" class="model-select">
+            <option value="">-- chọn mô hình --</option>
+          </select>
+          <input id="modelCustom" class="field-input" placeholder="Hoặc nhập tên mô hình…" style="padding:7px 10px;font-size:12.5px;margin-top:6px;display:none" />
+        </div>
+
+        <!-- API Key -->
+        <label class="field-label" style="margin-bottom:4px">API Key</label>
         <div class="api-key-row">
           <div class="api-key-dot" id="apiKeyDot"></div>
-          <input id="apiKey" type="password" placeholder="sk-… hoặc sk-or-…" autocomplete="off" />
+          <input id="apiKey" type="password" placeholder="Dán API key tại đây…" autocomplete="off" />
         </div>
-        <div style="padding:4px 0 0 4px">
+        <div style="padding:4px 0 0 2px">
           <label class="remember-row">
             <input id="rememberKey" type="checkbox" /> Ghi nhớ trong trình duyệt
           </label>
         </div>
-        <div style="padding:6px 0 0 2px">
-          <label class="field-label" style="margin-bottom:4px">Mô hình</label>
-          <input id="modelName" class="field-input" value="gpt-4.1-mini" style="padding:7px 10px;font-size:12.5px" />
-        </div>
+
         <button class="tool-btn" id="testKeyBtn" style="margin-top:8px;font-size:12px">
           <span class="tool-btn-icon icon--violet">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
           </span>
-          Kiểm tra API Key
+          Kiểm tra kết nối
         </button>
       </div>
 
@@ -686,30 +750,53 @@
 
   <script>
   /* ====================================================
-     app.js — Valuation RAG Chatbot (Flask backend)
+     app.js — Valuation RAG Chatbot (Flask + multi-LLM)
   ==================================================== */
 
   const $ = id => document.getElementById(id);
   const safe = v => String(v ?? '').replace(/[&<>"']/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-  let isSending = false;
-  let typingEl  = null;
+  let isSending   = false;
+  let typingEl    = null;
+  let providers   = [];          // filled from /api/providers
+  let activeProvider = null;     // currently selected provider object
 
-  // ── API helpers ────────────────────────────────────
-  function apiKey()   { return $('apiKey').value.trim(); }
-  function apiModel() { return $('modelName').value.trim() || 'gpt-4.1-mini'; }
-
-  function loadSettings() {
-    const k = localStorage.getItem('rag_api_key') || '';
-    const m = localStorage.getItem('rag_model') || '';
-    if (k) { $('apiKey').value = k; $('rememberKey').checked = true; }
-    if (m)   $('modelName').value = m;
+  // ── Provider & model helpers ───────────────────────
+  function baseUrl() {
+    if (!activeProvider) return '';
+    if (activeProvider.id === 'custom') return $('customBaseUrl').value.trim();
+    return activeProvider.base_url;
   }
+
+  function apiKey()   { return $('apiKey').value.trim(); }
+
+  function apiModel() {
+    const sel = $('modelSelect').value;
+    if (sel === '__custom__') return $('modelCustom').value.trim();
+    return sel || $('modelCustom').value.trim() || '';
+  }
+
+  // ── Persist / restore settings ─────────────────────
+  function loadSettings() {
+    const pid   = localStorage.getItem('rag_provider_id') || 'openai';
+    const key   = localStorage.getItem('rag_api_key') || '';
+    const model = localStorage.getItem('rag_model') || '';
+    const curl  = localStorage.getItem('rag_custom_url') || '';
+
+    if (key)  { $('apiKey').value = key; $('rememberKey').checked = true; }
+    if (curl)   $('customBaseUrl').value = curl;
+
+    // activate stored provider after providers are loaded
+    return { pid, model };
+  }
+
   function saveSettings() {
     if ($('rememberKey').checked) localStorage.setItem('rag_api_key', apiKey());
     else localStorage.removeItem('rag_api_key');
     localStorage.setItem('rag_model', apiModel());
+    localStorage.setItem('rag_custom_url', $('customBaseUrl').value.trim());
+    if (activeProvider) localStorage.setItem('rag_provider_id', activeProvider.id);
   }
 
   function setStatus(txt) { $('statusText').textContent = txt; }
@@ -720,11 +807,86 @@
     return d;
   }
 
-  // ── API key dot indicator ──────────────────────────
-  function setKeyDot(state) { // '' | 'ok' | 'err'
-    const dot = $('apiKeyDot');
-    dot.className = 'api-key-dot' + (state ? ' ' + state : '');
+  // ── API key dot ────────────────────────────────────
+  function setKeyDot(state) {
+    $('apiKeyDot').className = 'api-key-dot' + (state ? ' ' + state : '');
   }
+
+  // ── Load providers from backend ────────────────────
+  async function loadProviders() {
+    try {
+      const data = await fetch('/api/providers').then(r => r.json());
+      providers = data.providers || [];
+      const { pid, model } = loadSettings();
+      renderProviderGrid(pid, model);
+    } catch(e) {
+      $('providerGrid').innerHTML = '<div style="font-size:11.5px;color:#f87171;grid-column:1/-1">Không thể tải providers</div>';
+    }
+  }
+
+  function renderProviderGrid(activePid, savedModel) {
+    const grid = $('providerGrid');
+    grid.innerHTML = providers.map(p => `
+      <button class="provider-btn${p.id === activePid ? ' active' : ''}"
+              data-id="${safe(p.id)}"
+              style="--provider-color:${safe(p.color)}">
+        <span class="provider-dot" style="background:${safe(p.color)}"></span>
+        ${safe(p.label)}
+      </button>`).join('');
+
+    grid.querySelectorAll('.provider-btn').forEach(btn => {
+      btn.addEventListener('click', () => selectProvider(btn.dataset.id, ''));
+    });
+
+    // activate
+    selectProvider(activePid, savedModel);
+  }
+
+  function selectProvider(pid, preferredModel) {
+    const p = providers.find(x => x.id === pid) || providers[0];
+    if (!p) return;
+    activeProvider = p;
+
+    // update button states
+    $('providerGrid').querySelectorAll('.provider-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.id === p.id);
+      btn.style.setProperty('--provider-color', p.color);
+    });
+
+    // show/hide custom URL row
+    $('customUrlRow').style.display = p.id === 'custom' ? '' : 'none';
+
+    // populate model selector
+    const sel = $('modelSelect');
+    sel.innerHTML = p.models.map(m =>
+      `<option value="${safe(m)}">${safe(m)}</option>`
+    ).join('') + '<option value="__custom__">Nhập tên khác…</option>';
+
+    // restore saved model or default to first
+    const target = preferredModel || p.models[0] || '';
+    if (p.models.includes(target)) {
+      sel.value = target;
+      $('modelCustom').style.display = 'none';
+    } else if (target) {
+      sel.value = '__custom__';
+      $('modelCustom').value = target;
+      $('modelCustom').style.display = '';
+    } else {
+      sel.value = p.models[0] || '';
+      $('modelCustom').style.display = 'none';
+    }
+
+    // update key placeholder
+    $('apiKey').placeholder = p.key_placeholder || 'API key…';
+
+    setKeyDot('');
+  }
+
+  $('modelSelect') && document.addEventListener('DOMContentLoaded', () => {
+    $('modelSelect').addEventListener('change', () => {
+      $('modelCustom').style.display = $('modelSelect').value === '__custom__' ? '' : 'none';
+    });
+  });
 
   // ── Library ────────────────────────────────────────
   async function loadLibrary() {
@@ -770,7 +932,7 @@
 
     const meta = document.createElement('div');
     meta.className = 'message-meta';
-    meta.textContent = now;
+    meta.textContent = now + (activeProvider ? ` · ${activeProvider.label}` : '');
 
     cont.appendChild(bub);
 
@@ -796,11 +958,9 @@
   function appendUserMessage(text) {
     appendMessage('user', safe(text).replace(/\n/g,'<br>'));
   }
-
   function appendBotText(text, sources = []) {
     appendMessage('bot', safe(text).replace(/\n/g,'<br>'), sources);
   }
-
   function appendBotHtml(html, sources = []) {
     appendMessage('bot', html, sources);
   }
@@ -848,11 +1008,16 @@
     saveSettings();
 
     try {
-      setStatus('Đang truy xuất bằng chứng…');
+      setStatus(`Đang truy xuất · ${activeProvider?.label || ''}…`);
       const result = await fetch('/api/ask', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({question, api_key: apiKey(), model: apiModel()})
+        body: JSON.stringify({
+          question,
+          api_key:  apiKey(),
+          model:    apiModel(),
+          base_url: baseUrl(),
+        })
       }).then(readJson);
 
       hideTyping();
@@ -883,8 +1048,8 @@
     try {
       const result = await fetch('/api/upload-book', {method:'POST', body:fd}).then(readJson);
       const msg = result.inserted
-        ? `✅ Đã thêm sách **${safe(result.title)}** — ${result.page_count} trang, ${result.chunk_count} đoạn.`
-        : `ℹ️ Sách **${safe(result.title)}** đã có trong thư viện (${result.chunk_count} đoạn).`;
+        ? `✅ Đã thêm sách "${safe(result.title)}" — ${result.page_count} trang, ${result.chunk_count} đoạn.`
+        : `ℹ️ Sách "${safe(result.title)}" đã có trong thư viện (${result.chunk_count} đoạn).`;
       appendBotText(msg);
       setStatus('Đã thêm sách ✓');
       await loadLibrary();
@@ -902,7 +1067,7 @@
     const ticker  = $('reportTicker').value.trim()  || 'N/A';
     closeModal('reportModal');
 
-    appendBotHtml(`<span style="color:var(--text-muted)">⏳ Đang phân tích báo cáo của <strong>${safe(company)} (${safe(ticker)})</strong>…</span>`);
+    appendBotHtml(`<span style="color:var(--text-muted)">⏳ Đang phân tích báo cáo của <strong>${safe(company)} (${safe(ticker)})</strong> qua <strong>${safe(activeProvider?.label||'LLM')}</strong>…</span>`);
     setStatus('Đang phân tích…');
     saveSettings();
 
@@ -910,8 +1075,9 @@
     fd.append('report_file', file);
     fd.append('company', company);
     fd.append('ticker', ticker);
-    fd.append('api_key', apiKey());
-    fd.append('model', apiModel());
+    fd.append('api_key',  apiKey());
+    fd.append('model',    apiModel());
+    fd.append('base_url', baseUrl());
 
     try {
       const r = await fetch('/api/analyze-report', {method:'POST', body:fd}).then(readJson);
@@ -931,7 +1097,6 @@
     const actions = r.growth_actions || [];
     const lrep = r.llm_report;
 
-    // Score chips
     const scoreHtml = [
       ['Tổng Thể', s.overall_growth_score],
       ['Lợi Thế', s.moat_sustainability],
@@ -940,7 +1105,6 @@
       ['Tài Chính', s.financial_resilience],
     ].map(([l,v]) => `<span class="score-chip">${safe(l)}: <strong>${v}/100</strong></span>`).join('');
 
-    // SWOT
     const swotColor = {Điểm_Mạnh:'#34d399',Điểm_Yếu:'#f87171',Cơ_Hội:'#818cf8',Thách_Thức:'#fbbf24'};
     const swotHtml = [
       ['Điểm_Mạnh','Điểm Mạnh',sit.strengths],
@@ -953,12 +1117,10 @@
         <ul>${(items||[]).map(i=>`<li>${safe(i)}</li>`).join('')||'<li>—</li>'}</ul>
       </div>`).join('');
 
-    // Actions
     const actHtml = actions.length
       ? '<ol style="margin:4px 0 0 16px">' + actions.map(a=>`<li>${safe(a)}</li>`).join('') + '</ol>'
       : '<p style="color:var(--text-muted)">Không có hành động</p>';
 
-    // LLM report sections
     let repHtml = '';
     if (lrep && lrep.sections) {
       const sec = lrep.sections;
@@ -976,7 +1138,7 @@
         + '</div>';
     }
 
-    const html = `
+    appendBotHtml(`
       <div class="result-card">
         <h4>📊 Phân Tích: ${safe(company)} (${safe(ticker)})</h4>
         <div class="score-row">${scoreHtml}</div>
@@ -984,38 +1146,31 @@
           <div class="result-section-title">Lợi Thế Cạnh Tranh</div>
           <p><strong>${safe(adv.rating||'')}</strong> — ${safe(adv.assessment||'')}</p>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">
-          ${swotHtml}
-        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">${swotHtml}</div>
         <div class="result-section" style="margin-top:12px">
           <div class="result-section-title">Hành Động Tăng Trưởng</div>
           ${actHtml}
         </div>
         ${repHtml}
-      </div>`;
-
-    appendBotHtml(html);
-    appendBotText(`Phân tích **${company}** hoàn tất. Bạn có thể hỏi tôi bất kỳ câu hỏi nào về báo cáo này.`);
+      </div>`);
+    appendBotText(`Phân tích ${company} hoàn tất. Bạn có thể hỏi tôi bất kỳ câu hỏi nào về báo cáo này.`);
   }
 
-  // ── Test API key ───────────────────────────────────
+  // ── Test key ───────────────────────────────────────
   async function testKey() {
     saveSettings();
-    if (!apiKey()) { alert('Vui lòng dán khóa API trước.'); return; }
-    setStatus('Đang kiểm tra…');
-    setKeyDot('');
+    if (!apiKey()) { alert('Vui lòng dán API key trước.'); return; }
+    setStatus('Đang kiểm tra…'); setKeyDot('');
     try {
       const r = await fetch('/api/test-key', {
         method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({api_key: apiKey(), model: apiModel()})
-      }).then(readJson);
+        body: JSON.stringify({api_key: apiKey(), model: apiModel(), base_url: baseUrl()})
+      }).then(r => r.json());
       setKeyDot(r.ok ? 'ok' : 'err');
-      setStatus(r.ok ? 'API key hợp lệ ✓' : 'API key lỗi');
+      setStatus(r.ok ? `${activeProvider?.label||'API'} ✓` : 'Kết nối thất bại');
       alert(r.message);
     } catch(e) {
-      setKeyDot('err');
-      setStatus('Lỗi kiểm tra key');
-      alert(e.message);
+      setKeyDot('err'); setStatus('Lỗi'); alert(e.message);
     }
   }
 
@@ -1045,7 +1200,6 @@
     document.body.style.overflow = '';
   }
 
-  // ── Clear chat ─────────────────────────────────────
   function clearChat() {
     $('messagesList').innerHTML = '';
     setWelcome(true);
@@ -1063,10 +1217,7 @@
 
   $('userInput').addEventListener('input', () => { autoResize(); updateSendBtn(); });
   $('userInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      $('sendButton').click();
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('sendButton').click(); }
   });
 
   document.querySelectorAll('.starter-card').forEach(c => {
@@ -1076,16 +1227,14 @@
     });
   });
 
-  // Sidebar toggles
+  $('modelSelect').addEventListener('change', () => {
+    $('modelCustom').style.display = $('modelSelect').value === '__custom__' ? '' : 'none';
+  });
+
   $('menuBtn').addEventListener('click', openSidebar);
   $('sidebarCloseBtn').addEventListener('click', closeSidebar);
   $('sidebarOverlay').addEventListener('click', closeSidebar);
 
-  // Tool buttons (sidebar + header)
-  ['openBookModal','headerUploadBook'].forEach(id => $$(id) && $(id).addEventListener('click', () => { closeSidebar(); openModal('bookModal'); }));
-  ['openReportModal','headerAnalyzeReport'].forEach(id => $$(id) && $(id).addEventListener('click', () => { closeSidebar(); openModal('reportModal'); }));
-
-  function $$(id) { return document.getElementById(id); }
   $('openBookModal').addEventListener('click', () => { closeSidebar(); openModal('bookModal'); });
   $('headerUploadBook').addEventListener('click', () => openModal('bookModal'));
   $('openReportModal').addEventListener('click', () => { closeSidebar(); openModal('reportModal'); });
@@ -1095,20 +1244,18 @@
   $('refreshLibBtn').addEventListener('click', () => loadLibrary().catch(console.error));
   $('apiKey').addEventListener('change', () => setKeyDot(''));
 
-  // Modals
   $('bookModalClose').addEventListener('click', () => closeModal('bookModal'));
   $('bookSubmit').addEventListener('click', submitBook);
   $('reportModalClose').addEventListener('click', () => closeModal('reportModal'));
   $('reportSubmit').addEventListener('click', submitReport);
 
-  // Close modals on backdrop click
   $('bookModal').addEventListener('click', e => { if (e.target === $('bookModal')) closeModal('bookModal'); });
   $('reportModal').addEventListener('click', e => { if (e.target === $('reportModal')) closeModal('reportModal'); });
 
   // ── Init ───────────────────────────────────────────
-  loadSettings();
   updateSendBtn();
   setWelcome(true);
+  loadProviders();           // renders provider grid + restores settings
   loadLibrary().catch(console.error);
   </script>
 </body>

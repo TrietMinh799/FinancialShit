@@ -1,17 +1,101 @@
 """server.py — Flask HTTP server: routes and entry point."""
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_from_directory
 
 from core.analysis import analyze_report
-from core.config import OPENAI_MODEL, ensure_dirs
+from core.config import LLM_BASE_URL, OPENAI_MODEL, ensure_dirs
 from core.llm import answer_question, generate_kb_company_report, test_openai_key
-from core.store import Store
+from core.store import Store, safe_filename
 from core.text_utils import clean_text
 
 app = Flask(__name__, static_folder="web/static", template_folder="web")
+
+# ---------------------------------------------------------------------------
+# Provider presets — returned to the UI so it can populate the picker
+# ---------------------------------------------------------------------------
+
+PROVIDERS: list[dict] = [
+    {
+        "id": "openai",
+        "label": "ChatGPT (OpenAI)",
+        "base_url": "https://api.openai.com/v1",
+        "models": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "o3-mini"],
+        "key_placeholder": "sk-proj-…",
+        "color": "#10a37f",
+    },
+    {
+        "id": "anthropic_or",
+        "label": "Claude (via OpenRouter)",
+        "base_url": "https://openrouter.ai/api/v1",
+        "models": [
+            "anthropic/claude-sonnet-4-5",
+            "anthropic/claude-3.5-sonnet",
+            "anthropic/claude-3-haiku",
+            "anthropic/claude-3-opus",
+        ],
+        "key_placeholder": "sk-or-v1-…",
+        "color": "#d97706",
+    },
+    {
+        "id": "gemini_or",
+        "label": "Gemini (via OpenRouter)",
+        "base_url": "https://openrouter.ai/api/v1",
+        "models": [
+            "google/gemini-2.0-flash-exp:free",
+            "google/gemini-2.5-pro",
+            "google/gemini-2.5-flash",
+            "google/gemini-pro-1.5",
+        ],
+        "key_placeholder": "sk-or-v1-…",
+        "color": "#4285f4",
+    },
+    {
+        "id": "openrouter",
+        "label": "OpenRouter",
+        "base_url": "https://openrouter.ai/api/v1",
+        "models": [
+            "google/gemini-2.0-flash-exp:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "mistralai/mistral-7b-instruct:free",
+            "deepseek/deepseek-r1:free",
+        ],
+        "key_placeholder": "sk-or-v1-…",
+        "color": "#7c3aed",
+    },
+    {
+        "id": "groq",
+        "label": "Groq",
+        "base_url": "https://api.groq.com/openai/v1",
+        "models": [
+            "llama-3.3-70b-versatile",
+            "llama3-70b-8192",
+            "mixtral-8x7b-32768",
+            "gemma2-9b-it",
+        ],
+        "key_placeholder": "gsk_…",
+        "color": "#f97316",
+    },
+    {
+        "id": "ollama",
+        "label": "Ollama (local)",
+        "base_url": "http://localhost:11434/v1",
+        "models": ["llama3.2", "llama3.1", "mistral", "gemma2", "phi3"],
+        "key_placeholder": "ollama",
+        "color": "#64748b",
+    },
+    {
+        "id": "custom",
+        "label": "Custom / Self-hosted",
+        "base_url": "",
+        "models": [],
+        "key_placeholder": "API key…",
+        "color": "#6366f1",
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -35,6 +119,12 @@ def library():
         return jsonify({"error": str(exc)}), 500
 
 
+@app.route("/api/providers")
+def providers():
+    """Return the list of supported LLM provider presets."""
+    return jsonify({"providers": PROVIDERS, "default_base_url": LLM_BASE_URL})
+
+
 # ---------------------------------------------------------------------------
 # POST routes
 # ---------------------------------------------------------------------------
@@ -44,12 +134,17 @@ def test_key():
     payload = request.get_json(silent=True) or {}
     api_key = clean_text(payload.get("api_key", ""))
     if not api_key:
-        return jsonify({"error": "Paste your ChatGPT API key first."}), 400
-    ok = test_openai_key(api_key, payload.get("model") or OPENAI_MODEL)
-    return jsonify({
-        "ok": ok,
-        "message": "API key works." if ok else "The API key test did not return a response.",
-    })
+        return jsonify({"error": "Paste your API key first."}), 400
+    base_url = payload.get("base_url") or LLM_BASE_URL
+    model = payload.get("model") or OPENAI_MODEL
+    try:
+        ok = test_openai_key(api_key, model, base_url)
+        return jsonify({
+            "ok": ok,
+            "message": "API key works." if ok else "The API key test did not return a response.",
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 200
 
 
 @app.route("/api/ask", methods=["POST"])
@@ -64,6 +159,7 @@ def ask():
             question,
             payload.get("api_key") or "",
             payload.get("model") or OPENAI_MODEL,
+            payload.get("base_url") or LLM_BASE_URL,
         )
         return jsonify(result)
     except Exception as exc:
@@ -77,9 +173,6 @@ def upload_book():
         return jsonify({"error": "Choose a book PDF, EPUB, DOCX, TXT, or MD file."}), 400
 
     from core.config import UPLOAD_DIR
-    import uuid
-    from core.store import safe_filename
-
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_filename(file.filename)}"
     file.save(str(target))
 
@@ -98,9 +191,6 @@ def analyze_report_route():
         return jsonify({"error": "Choose an annual report PDF."}), 400
 
     from core.config import UPLOAD_DIR
-    import uuid
-    from core.store import safe_filename
-
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_filename(file.filename)}"
     file.save(str(target))
 
@@ -108,11 +198,14 @@ def analyze_report_route():
     ticker = request.form.get("ticker") or "UPLOAD"
     api_key = request.form.get("api_key") or ""
     model = request.form.get("model") or OPENAI_MODEL
+    base_url = request.form.get("base_url") or LLM_BASE_URL
 
     try:
         store = Store()
         result = analyze_report(store, target, company, ticker)
-        result["llm_report"] = generate_kb_company_report(store, company, ticker, api_key, model)
+        result["llm_report"] = generate_kb_company_report(
+            store, company, ticker, api_key, model, base_url
+        )
         return jsonify(result)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500

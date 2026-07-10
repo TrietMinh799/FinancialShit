@@ -11,6 +11,7 @@ from pathlib import Path
 from core.config import DB_PATH, UPLOAD_DIR
 from core.extractors import extract_pages
 from core.text_utils import chunk_pages, query_terms, snippet_for
+from core.vector_store import VectorStore
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +99,14 @@ class Store:
 
     def __init__(self, path: Path = DB_PATH) -> None:
         self.path = path
+        self._vector_store: VectorStore | None = None
         self._init_db()
+
+    def vector_store(self) -> VectorStore:
+        """Lazy-initialised vector store for hybrid search."""
+        if self._vector_store is None:
+            self._vector_store = VectorStore()
+        return self._vector_store
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -239,6 +247,13 @@ class Store:
                         (c.lastrowid, chunk["text"]),
                     )
 
+            # Index into ChromaDB for vector search
+            source_type_str = source_type or "book"
+            try:
+                self.vector_store().index_chunks(doc_id, title or path.stem, source_type_str, chunks)
+            except Exception:
+                pass  # vector indexing is optional — don't break document insert
+
             return {
                 "document_id": doc_id,
                 "title": title or path.stem,
@@ -319,3 +334,54 @@ class Store:
                 [*source_types, *[f"%{term}%" for term in terms[:6]], limit],
             ).fetchall()
             return [self._row_to_search_result(row, terms) for row in rows]
+
+    # ------------------------------------------------------------------
+    # Hybrid search — Reciprocal Rank Fusion (vector + BM25)
+    # ------------------------------------------------------------------
+
+    def hybrid_search(
+        self,
+        query: str,
+        source_types: list[str] | None = None,
+        limit: int = 10,
+        rrf_k: int = 60,
+    ) -> list[dict]:
+        """Combine vector (ChromaDB) and BM25 (FTS5) results via RRF.
+
+        Returns the best *limit* results deduplicated and ranked by fused score.
+        """
+        # 1. Get BM25 results (limit higher for good recall)
+        bm25_results = self.search(query, source_types, limit * 3)
+
+        # 2. Get vector results
+        vec_results = self.vector_store().search(query, source_types, limit * 3)
+
+        # 3. RRF merge
+        seen_ids: set = set()
+        fused: list[tuple[float, dict]] = []
+
+        def rank_key(item: dict) -> tuple:
+            return (item.get("document_id"), item.get("chunk_id"), item.get("page_start"))
+
+        for rank, item in enumerate(bm25_results):
+            key = rank_key(item)
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            score = 1.0 / (rrf_k + rank)
+            fused.append((score, item))
+
+        for rank, item in enumerate(vec_results):
+            key = rank_key(item)
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            # BM25 component contribution
+            bm25_contrib = 1.0 / (rrf_k + len(bm25_results) + 1)  # rank beyond BM25 list
+            score = bm25_contrib + 1.0 / (rrf_k + rank)
+            fused.append((score, item))
+
+        # 4. Sort by fused score descending
+        fused.sort(key=lambda pair: pair[0], reverse=True)
+
+        return [item for _, item in fused[:limit]]

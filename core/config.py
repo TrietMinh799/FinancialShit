@@ -15,6 +15,7 @@ load_dotenv()
 ROOT = Path(tempfile.gettempdir()) / "valuation_rag_platform_epub_clean"
 UPLOAD_DIR = ROOT / "uploads"
 DB_PATH = ROOT / "rag.sqlite3"
+CHROMA_DIR = ROOT / "chroma"
 
 # In-memory run cache (populated by analysis.analyze_report)
 RUNS: dict = {}
