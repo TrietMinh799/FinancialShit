@@ -10,7 +10,7 @@ from core.analysis import analyze_report
 from core.config import LLM_BASE_URL, OPENAI_MODEL, ensure_dirs
 from core.llm import answer_question, generate_kb_company_report, test_openai_key
 from core.store import Store, safe_filename
-from core.text_utils import clean_text
+from core.text_utils import clean_text, sanitize_field
 
 app = Flask(__name__, static_folder="web/static", template_folder="web")
 
@@ -176,7 +176,7 @@ def upload_book():
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_filename(file.filename)}"
     file.save(str(target))
 
-    title = request.form.get("book_title") or Path(file.filename).stem
+    title = sanitize_field(request.form.get("book_title") or Path(file.filename).stem)
     try:
         result = Store().add_document(target, title, "book")
         return jsonify(result)
@@ -194,8 +194,8 @@ def analyze_report_route():
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_filename(file.filename)}"
     file.save(str(target))
 
-    company = request.form.get("company") or "Uploaded Company"
-    ticker = request.form.get("ticker") or "UPLOAD"
+    company = sanitize_field(request.form.get("company") or "Uploaded Company")
+    ticker = sanitize_field(request.form.get("ticker") or "UPLOAD", max_len=20)
     api_key = request.form.get("api_key") or ""
     model = request.form.get("model") or OPENAI_MODEL
     base_url = request.form.get("base_url") or LLM_BASE_URL

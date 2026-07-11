@@ -10,7 +10,7 @@ from pathlib import Path
 
 from core.config import DB_PATH, UPLOAD_DIR
 from core.extractors import extract_pages
-from core.text_utils import chunk_pages, query_terms, snippet_for
+from core.text_utils import chunk_pages, query_terms, sanitize_injection, snippet_for
 from core.vector_store import VectorStore
 
 
@@ -235,22 +235,26 @@ class Store:
             fts = self._has_fts(conn)
 
             for index, chunk in enumerate(chunks):
+                chunk_text = sanitize_injection(chunk["text"])
                 c = conn.execute(
                     "INSERT INTO chunks "
                     "(document_id, chunk_index, page_start, page_end, text) "
                     "VALUES (?, ?, ?, ?, ?)",
-                    (doc_id, index, chunk["page_start"], chunk["page_end"], chunk["text"]),
+                    (doc_id, index, chunk["page_start"], chunk["page_end"], chunk_text),
                 )
                 if fts:
                     conn.execute(
                         "INSERT INTO chunk_fts(rowid, text) VALUES (?, ?)",
-                        (c.lastrowid, chunk["text"]),
+                        (c.lastrowid, chunk_text),
                     )
 
-            # Index into ChromaDB for vector search
+            # Index into ChromaDB for vector search (with sanitised text)
+            sanitised_chunks = [
+                {**ch, "text": sanitize_injection(ch["text"])} for ch in chunks
+            ]
             source_type_str = source_type or "book"
             try:
-                self.vector_store().index_chunks(doc_id, title or path.stem, source_type_str, chunks)
+                self.vector_store().index_chunks(doc_id, title or path.stem, source_type_str, sanitised_chunks)
             except Exception:
                 pass  # vector indexing is optional — don't break document insert
 
@@ -323,7 +327,17 @@ class Store:
                 except sqlite3.OperationalError:
                     pass  # fall through to LIKE
 
-            like_clause = " OR ".join("LOWER(c.text) LIKE ?" for _ in terms[:6])
+            like_patterns: list[str] = []
+            like_params: list[str] = []
+            for term in terms[:6]:
+                like_patterns.append("LOWER(c.text) LIKE ?")
+                like_params.append(f"%{term}%")
+                # Also match ASCII-only terms with wildcard between every character
+                # so "cong" matches both "công" and "cong" in the text
+                if term.isascii():
+                    like_patterns.append("LOWER(c.text) LIKE ?")
+                    like_params.append(f"%{'%'.join(term)}%")
+            like_clause = " OR ".join(like_patterns)
             rows = conn.execute(
                 f"SELECT c.id AS chunk_id, d.id AS document_id, d.title,"
                 f"       d.source_type, c.page_start, c.page_end, c.text, 0 AS score"
@@ -331,7 +345,7 @@ class Store:
                 f" JOIN documents d ON d.id = c.document_id"
                 f" WHERE d.source_type IN ({placeholders}) AND ({like_clause})"
                 f" LIMIT ?",
-                [*source_types, *[f"%{term}%" for term in terms[:6]], limit],
+                [*source_types, *like_params, limit],
             ).fetchall()
             return [self._row_to_search_result(row, terms) for row in rows]
 

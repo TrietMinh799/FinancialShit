@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import html
 import re
+import unicodedata
 
 from core.config import (
     EXECUTION_TERMS,
@@ -30,19 +31,107 @@ def strip_markup(value: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Prompt-injection sanitisation
+# ---------------------------------------------------------------------------
+
+# Phrases commonly used to hijack an LLM via injected document content.
+_INJECTION_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"ignore\s+(all\s+)?(previous|above|prior|earlier|preceding)\s+(instructions?|prompts?|rules?|context)",
+        r"disregard\s+(all\s+)?(previous|above|prior|earlier|preceding)\s+(instructions?|prompts?|rules?|context)",
+        r"forget\s+(all\s+)?(previous|above|prior|earlier|preceding)\s+(instructions?|prompts?|rules?|context)",
+        r"override\s+(all\s+)?(previous|above|prior|earlier|preceding)\s+(instructions?|prompts?|rules?|context)",
+        r"do\s+not\s+follow\s+(the\s+)?(system|previous|above|prior)\s+(prompt|instructions?|rules?)",
+        r"you\s+are\s+now\s+(a|an)\s+",
+        r"new\s+(instructions?|role|persona|identity)\s*[:.]",
+        r"act\s+as\s+(a|an|if)\s+",
+        r"switch\s+(to|into)\s+(a\s+)?(new\s+)?(role|mode|persona)",
+        r"system\s*:\s*",
+        r"<\s*/?\s*system\s*>",
+        r"<<\s*SYS\s*>>",
+        r"\[INST\]",
+        r"\[/INST\]",
+        r"BEGIN\s+(INSTRUCTION|SYSTEM|PROMPT)",
+        r"END\s+(INSTRUCTION|SYSTEM|PROMPT)",
+        r"###\s*(instruction|system|prompt)",
+    )
+]
+
+_INJECTION_REPLACEMENT = "[content removed]"
+
+
+def sanitize_injection(text: str) -> str:
+    """Neutralise common prompt-injection phrases in document text.
+
+    Replaces each matched pattern with a harmless placeholder so the
+    surrounding financial content is preserved.
+    """
+    for pattern in _INJECTION_PATTERNS:
+        text = pattern.sub(_INJECTION_REPLACEMENT, text)
+    return text
+
+
+# Max length for short user-supplied metadata fields (title, company, ticker).
+_FIELD_MAX_LEN = 200
+
+
+def sanitize_field(value: str, max_len: int = _FIELD_MAX_LEN) -> str:
+    """Sanitise a short user-supplied metadata field.
+
+    * Collapses whitespace
+    * Strips control characters and common injection markers
+    * Truncates to *max_len*
+    """
+    value = clean_text(value)
+    # Remove control chars (except normal whitespace)
+    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", value)
+    # Strip role/tag markers that could shift the LLM's role perception
+    for pattern in _INJECTION_PATTERNS:
+        value = pattern.sub("", value)
+    return value[:max_len].strip()
+
+
+# ---------------------------------------------------------------------------
+# Vietnamese diacritic removal
+# ---------------------------------------------------------------------------
+
+def remove_diacritics(text: str) -> str:
+    """Strip diacritics from Vietnamese/Latin text (e.g., ``công`` → ``cong``)."""
+    normalized = unicodedata.normalize("NFD", text)
+    ascii_chars: list[str] = []
+    for ch in normalized:
+        if unicodedata.combining(ch):
+            continue
+        # đ (U+0111) → d, Đ (U+0110) → D
+        if ch == "\u0111":
+            ascii_chars.append("d")
+        elif ch == "\u0110":
+            ascii_chars.append("D")
+        else:
+            ascii_chars.append(ch)
+    return "".join(ascii_chars)
+
+
+# ---------------------------------------------------------------------------
 # Tokenisation
 # ---------------------------------------------------------------------------
 
 def query_terms(query: str, limit: int = 14) -> list[str]:
-    """Extract meaningful tokens from *query* for keyword search."""
+    """Extract meaningful tokens from *query* for keyword search.
+
+    Also extracts diacritic-free alternatives so that typing
+    ``"cong ty"`` still matches ``"công ty"`` via LIKE fallback.
+    """
     terms: list[str] = []
-    for token in re.findall(r"[A-Za-z][A-Za-z0-9]+", query.lower()):
-        if len(token) < 3 or token in STOPWORDS:
-            continue
-        if token not in terms:
-            terms.append(token)
-        if len(terms) >= limit:
-            break
+    for raw in (query, remove_diacritics(query)):
+        for token in re.findall(r"[^\W\d_][^\W_]+", raw.lower()):
+            if len(token) < 3 or token in STOPWORDS:
+                continue
+            if token not in terms:
+                terms.append(token)
+                if len(terms) >= limit:
+                    return terms
     return terms
 
 

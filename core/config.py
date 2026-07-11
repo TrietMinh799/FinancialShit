@@ -40,10 +40,28 @@ LLM_BASE_URL: str = os.environ.get("LLM_BASE_URL", "https://api.openai.com/v1").
 # NLP helpers
 # ---------------------------------------------------------------------------
 STOPWORDS: set[str] = {
+    # English stopwords
     "about", "after", "also", "and", "are", "because", "been", "between",
     "business", "can", "company", "from", "growth", "have", "into", "its",
     "more", "not", "that", "the", "their", "this", "with", "what", "when",
     "where", "whether", "will",
+    # Vietnamese stopwords (with and without diacritics)
+    "của", "và", "có", "trong", "cho", "với", "các", "được", "một",
+    "này", "đã", "sẽ", "đang", "là", "không", "tại", "theo", "khi",
+    "về", "từ", "hoặc", "như", "trên", "giữa", "sau", "trước", "nên",
+    "rằng", "mà", "vì", "nếu", "thì", "để", "qua", "lại", "ra", "vào",
+    "những", "nhiều", "mọi", "mỗi", "đó", "đây", "ấy", "nay", "vậy",
+    "bị", "phải", "làm", "hơn", "rất", "cùng", "khi", "đến", "nơi",
+    "việc", "người", "cả", "đều", "tôi", "bạn", "chúng",
+    # Diacritic-free variants (for users typing without diacritics)
+    "cua", "va", "co", "duoc", "mot", "da", "se", "dang", "la", "khong",
+    "ve", "tu", "hoac", "nhu", "tren", "giua", "truoc", "nen", "rang",
+    "ma", "vi", "neu", "thi", "de", "qua", "lai", "vao",
+    "nhung", "nhieu", "moi", "do", "day", "ay", "vay",
+    "bi", "phai", "lam", "hon", "rat", "cung", "den", "noi",
+    "viec", "nguoi", "ca", "deu", "toi", "ban", "chung",
+    # Additional missing diacritic-free variants
+    "cac", "tai", "voi",
 }
 
 # ---------------------------------------------------------------------------
