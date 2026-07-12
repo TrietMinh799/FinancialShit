@@ -1,4 +1,5 @@
 """extractors.py — Document parsing: PDF, EPUB, DOCX, TXT/MD → list of (page, text)."""
+
 from __future__ import annotations
 
 import zipfile
@@ -9,10 +10,10 @@ from pypdf import PdfReader
 
 from core.text_utils import clean_text, strip_markup
 
-
 # ---------------------------------------------------------------------------
 # DOCX extractor
 # ---------------------------------------------------------------------------
+
 
 def extract_docx_pages(path: Path) -> list[tuple[int, str]]:
     """Extract text from a DOCX file, returning (page_index, text) pairs."""
@@ -51,6 +52,7 @@ def extract_docx_pages(path: Path) -> list[tuple[int, str]]:
 # EPUB extractor
 # ---------------------------------------------------------------------------
 
+
 def extract_epub_pages(path: Path) -> list[tuple[int, str]]:
     """Extract text from an EPUB file in spine order, returning (page_index, text) pairs."""
     pages: list[tuple[int, str]] = []
@@ -85,9 +87,13 @@ def extract_epub_pages(path: Path) -> list[tuple[int, str]]:
                     item_id = element.attrib.get("id")
                     href = element.attrib.get("href")
                     media_type = element.attrib.get("media-type", "")
-                    if item_id and href and (
-                        "html" in media_type
-                        or href.lower().endswith((".html", ".xhtml", ".htm"))
+                    if (
+                        item_id
+                        and href
+                        and (
+                            "html" in media_type
+                            or href.lower().endswith((".html", ".xhtml", ".htm"))
+                        )
                     ):
                         manifest[item_id] = (base + "/" + href).lstrip("/") if base else href
                 elif tag == "itemref":
@@ -118,6 +124,7 @@ def extract_epub_pages(path: Path) -> list[tuple[int, str]]:
 # ---------------------------------------------------------------------------
 # Unified dispatcher
 # ---------------------------------------------------------------------------
+
 
 def extract_pages(path: Path) -> list[tuple[int, str]]:
     """Return a list of (page_number, text) tuples for any supported document format."""

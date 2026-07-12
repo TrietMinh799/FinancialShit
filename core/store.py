@@ -1,11 +1,14 @@
 """store.py — SQLite document store, FTS search, and multipart form parsing."""
+
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import re
 import sqlite3
 import uuid
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 from core.config import DB_PATH, UPLOAD_DIR
@@ -13,10 +16,10 @@ from core.extractors import extract_pages
 from core.text_utils import chunk_pages, query_terms, sanitize_injection, snippet_for
 from core.vector_store import VectorStore
 
-
 # ---------------------------------------------------------------------------
 # Multipart parsing helpers
 # ---------------------------------------------------------------------------
+
 
 def parse_content_disposition(value: str) -> dict[str, str]:
     """Parse a Content-Disposition header value into a key→value dict."""
@@ -34,7 +37,9 @@ def safe_filename(name: str) -> str:
     return stem or "upload.bin"
 
 
-def parse_multipart(handler) -> tuple[dict[str, str], dict[str, Path]]:
+def parse_multipart(
+    handler: BaseHTTPRequestHandler,
+) -> tuple[dict[str, str], dict[str, Path]]:
     """Parse a multipart/form-data request body into (fields, files).
 
     Files are written to UPLOAD_DIR and returned as Path objects.
@@ -81,6 +86,7 @@ def parse_multipart(handler) -> tuple[dict[str, str], dict[str, Path]]:
 # Hashing
 # ---------------------------------------------------------------------------
 
+
 def document_hash(path: Path) -> str:
     """Return the SHA-256 hex digest of the file at *path*."""
     digest = hashlib.sha256()
@@ -93,6 +99,7 @@ def document_hash(path: Path) -> str:
 # ---------------------------------------------------------------------------
 # Store — SQLite CRUD + FTS
 # ---------------------------------------------------------------------------
+
 
 class Store:
     """Persistent document store backed by SQLite with optional FTS5 search."""
@@ -142,13 +149,11 @@ class Store:
                 "  text TEXT NOT NULL"
                 ")"
             )
-            try:
+            with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts "
                     "USING fts5(text, content='chunks', content_rowid='id')"
                 )
-            except sqlite3.OperationalError:
-                pass  # FTS5 not available — fall back to LIKE search
 
     def _has_fts(self, conn: sqlite3.Connection) -> bool:
         return (
@@ -188,7 +193,11 @@ class Store:
         pages = extract_pages(path)
         if not pages:
             raise ValueError("No readable text was found in this file.")
-        chunks = chunk_pages(pages)
+        # Reports are dense; smaller chunks improve retrieval precision.
+        if source_type == "annual_report":
+            chunks = chunk_pages(pages, chunk_chars=800, overlap=120)
+        else:
+            chunks = chunk_pages(pages)
         if not chunks:
             raise ValueError("No usable chunks were created from this file.")
 
@@ -249,14 +258,15 @@ class Store:
                     )
 
             # Index into ChromaDB for vector search (with sanitised text)
-            sanitised_chunks = [
-                {**ch, "text": sanitize_injection(ch["text"])} for ch in chunks
-            ]
+            sanitised_chunks = [{**ch, "text": sanitize_injection(ch["text"])} for ch in chunks]
             source_type_str = source_type or "book"
-            try:
-                self.vector_store().index_chunks(doc_id, title or path.stem, source_type_str, sanitised_chunks)
-            except Exception:
-                pass  # vector indexing is optional — don't break document insert
+            with contextlib.suppress(Exception):
+                self.vector_store().index_chunks(
+                    doc_id,
+                    title or path.stem,
+                    source_type_str,
+                    sanitised_chunks,
+                )
 
             return {
                 "document_id": doc_id,
@@ -399,3 +409,52 @@ class Store:
         fused.sort(key=lambda pair: pair[0], reverse=True)
 
         return [item for _, item in fused[:limit]]
+
+    # ------------------------------------------------------------------
+    # Re-index (e.g. after switching the embedding model)
+    # ------------------------------------------------------------------
+
+    def reindex_all(self) -> int:
+        """Re-embed every stored chunk into the vector store.
+
+        Reads chunk text back from SQLite (where it is kept verbatim) and
+        re-runs the current embedding model. Use this after changing
+        ``EMBED_MODEL`` so the vector index matches the new model.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT c.document_id, c.chunk_index, c.page_start, c.page_end, c.text,"
+                "       d.title, d.source_type"
+                " FROM chunks c"
+                " JOIN documents d ON d.id = c.document_id"
+                " ORDER BY c.document_id, c.chunk_index"
+            ).fetchall()
+
+        by_doc: dict[int, list[dict]] = {}
+        meta: dict[int, dict] = {}
+        for row in rows:
+            doc_id = row["document_id"]
+            if doc_id not in by_doc:
+                by_doc[doc_id] = []
+                meta[doc_id] = {
+                    "title": row["title"],
+                    "source_type": row["source_type"],
+                }
+            by_doc[doc_id].append(
+                {
+                    "text": row["text"],
+                    "page_start": row["page_start"],
+                    "page_end": row["page_end"],
+                }
+            )
+
+        total = 0
+        for doc_id, chunks in by_doc.items():
+            self.vector_store().index_chunks(
+                doc_id,
+                meta[doc_id]["title"],
+                meta[doc_id]["source_type"],
+                chunks,
+            )
+            total += len(chunks)
+        return total

@@ -1,4 +1,5 @@
 """text_utils.py — Pure text-processing helpers with no I/O or DB side-effects."""
+
 from __future__ import annotations
 
 import html
@@ -6,17 +7,13 @@ import re
 import unicodedata
 
 from core.config import (
-    EXECUTION_TERMS,
-    GROWTH_TERMS,
-    MOAT_TERMS,
-    RISK_TERMS,
     STOPWORDS,
 )
-
 
 # ---------------------------------------------------------------------------
 # Basic cleaning
 # ---------------------------------------------------------------------------
+
 
 def clean_text(value: str | None) -> str:
     """Collapse whitespace and strip leading/trailing space."""
@@ -96,6 +93,7 @@ def sanitize_field(value: str, max_len: int = _FIELD_MAX_LEN) -> str:
 # Vietnamese diacritic removal
 # ---------------------------------------------------------------------------
 
+
 def remove_diacritics(text: str) -> str:
     """Strip diacritics from Vietnamese/Latin text (e.g., ``công`` → ``cong``)."""
     normalized = unicodedata.normalize("NFD", text)
@@ -116,6 +114,7 @@ def remove_diacritics(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Tokenisation
 # ---------------------------------------------------------------------------
+
 
 def query_terms(query: str, limit: int = 14) -> list[str]:
     """Extract meaningful tokens from *query* for keyword search.
@@ -139,6 +138,7 @@ def query_terms(query: str, limit: int = 14) -> list[str]:
 # Chunking
 # ---------------------------------------------------------------------------
 
+
 def chunk_pages(
     pages: list[tuple[int, str]],
     chunk_chars: int = 1400,
@@ -152,9 +152,7 @@ def chunk_pages(
         while start < len(text):
             chunk = clean_text(text[start : start + chunk_chars])
             if len(chunk) >= 120:
-                chunks.append(
-                    {"page_start": page_number, "page_end": page_number, "text": chunk}
-                )
+                chunks.append({"page_start": page_number, "page_end": page_number, "text": chunk})
             start += step
     return chunks
 
@@ -162,6 +160,7 @@ def chunk_pages(
 # ---------------------------------------------------------------------------
 # Snippet extraction
 # ---------------------------------------------------------------------------
+
 
 def snippet_for(text: str, terms: list[str], max_chars: int = 420) -> str:
     """Return a short excerpt of *text* that is most likely to contain *terms*."""
@@ -177,6 +176,7 @@ def snippet_for(text: str, terms: list[str], max_chars: int = 420) -> str:
 # ---------------------------------------------------------------------------
 # Vocabulary matching
 # ---------------------------------------------------------------------------
+
 
 def matched_labels(text: str, vocab: dict[str, str]) -> list[str]:
     """Return sorted list of human-readable labels whose terms appear in *text*."""
@@ -198,6 +198,7 @@ def clip(value: float, low: float = 0, high: float = 100) -> int:
 # ---------------------------------------------------------------------------
 # Result deduplication
 # ---------------------------------------------------------------------------
+
 
 def unique(items: list[dict], limit: int = 10) -> list[dict]:
     """Deduplicate search results by (document_id, chunk_id, page_start, snippet)."""
@@ -223,9 +224,8 @@ def unique(items: list[dict], limit: int = 10) -> list[dict]:
 # Annual-report keyword search (no DB)
 # ---------------------------------------------------------------------------
 
-def annual_hits(
-    pages: list[tuple[int, str]], query: str, limit: int = 6
-) -> list[dict]:
+
+def annual_hits(pages: list[tuple[int, str]], query: str, limit: int = 6) -> list[dict]:
     """Score raw pages against *query* terms and return top hits."""
     terms = query_terms(query)
     scored: list[dict] = []

@@ -84,11 +84,42 @@
     // Allow simple line-break rendering
     bubbleEl.innerHTML = escapeHtml(text).replace(/\n/g, '<br>');
 
+    // Copy button
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'copy-btn';
+    copyBtn.setAttribute('aria-label', 'Copy message');
+    copyBtn.innerHTML = `
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+      </svg>
+    `;
+    copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(text).then(() => {
+        const originalHtml = copyBtn.innerHTML;
+        copyBtn.innerHTML = `
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 6 9 17 4 12"/>
+          </svg>
+        `;
+        copyBtn.classList.add('copied');
+        setTimeout(() => {
+          copyBtn.innerHTML = originalHtml;
+          copyBtn.classList.remove('copied');
+        }, 1500);
+      });
+    });
+
     const metaEl = document.createElement('div');
     metaEl.className = 'message-meta';
     metaEl.textContent = now;
 
-    contentEl.appendChild(bubbleEl);
+    const bubbleWrapper = document.createElement('div');
+    bubbleWrapper.className = 'message-bubble-wrapper';
+    bubbleWrapper.appendChild(bubbleEl);
+    bubbleWrapper.appendChild(copyBtn);
+
+    contentEl.appendChild(bubbleWrapper);
 
     // Source tags (bot only)
     if (role === 'bot' && sources.length > 0) {

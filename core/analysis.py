@@ -1,9 +1,11 @@
 """analysis.py — Rule-based scoring engine and annual-report analyser."""
+
 from __future__ import annotations
 
 import math
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from core.config import (
     EXECUTION_TERMS,
@@ -13,6 +15,7 @@ from core.config import (
     RUNS,
 )
 from core.extractors import extract_pages
+from core.store import Store
 from core.text_utils import (
     annual_hits,
     clip,
@@ -21,10 +24,10 @@ from core.text_utils import (
     unique,
 )
 
-
 # ---------------------------------------------------------------------------
 # Score computation
 # ---------------------------------------------------------------------------
+
 
 def _compute_scores(
     report_text: str,
@@ -53,13 +56,9 @@ def _compute_scores(
         + min(26, growth_mentions / log_scale)
         - min(14, risk_mentions / (log_scale * 2.2))
     )
-    execution_score = clip(
-        42 + len(execution) * 6 + min(22, execution_mentions / log_scale)
-    )
+    execution_score = clip(42 + len(execution) * 6 + min(22, execution_mentions / log_scale))
     financial_score = clip(
-        58
-        - min(24, risk_mentions / log_scale)
-        + (8 if "Risk management" in execution else 0)
+        58 - min(24, risk_mentions / log_scale) + (8 if "Risk management" in execution else 0)
     )
     risk_score = clip(35 + len(risks) * 6 + min(28, risk_mentions / log_scale))
 
@@ -97,8 +96,7 @@ def _moat_rating(moat_score: int) -> tuple[str, str]:
         )
     return (
         "Developing",
-        "The report shows some advantage signals, but sustainability needs "
-        "more evidence.",
+        "The report shows some advantage signals, but sustainability needs more evidence.",
     )
 
 
@@ -106,9 +104,8 @@ def _moat_rating(moat_score: int) -> tuple[str, str]:
 # Strategic actions
 # ---------------------------------------------------------------------------
 
-def _build_growth_actions(
-    moat: list[str], growth: list[str], risks: list[str]
-) -> list[str]:
+
+def _build_growth_actions(moat: list[str], growth: list[str], risks: list[str]) -> list[str]:
     """Derive prioritised management actions from signal lists."""
     actions: list[str] = []
 
@@ -154,7 +151,13 @@ def _build_growth_actions(
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def analyze_report(store, report_path, company: str, ticker: str) -> dict:
+
+def analyze_report(
+    store: Store,
+    report_path: Path,
+    company: str,
+    ticker: str,
+) -> dict:
     """Parse *report_path*, score it, and persist the result in RUNS.
 
     Also searches *store* for supporting knowledge-base citations.
@@ -174,8 +177,7 @@ def analyze_report(store, report_path, company: str, ticker: str) -> dict:
     scores = _compute_scores(report_text, moat, growth, execution, risks)
     moat_rating, moat_assessment = _moat_rating(scores["moat_score"])
     growth_rating = (
-        "High" if scores["overall"] >= 75
-        else ("Medium" if scores["overall"] >= 60 else "Watch")
+        "High" if scores["overall"] >= 75 else ("Medium" if scores["overall"] >= 60 else "Watch")
     )
 
     # SWOT
@@ -188,8 +190,7 @@ def analyze_report(store, report_path, company: str, ticker: str) -> dict:
     queries = [
         f"{company} sustainable competitive advantage moat scale switching costs "
         "cost advantage barriers",
-        f"{company} company situation competitive pressure risks market share "
-        "capital allocation",
+        f"{company} company situation competitive pressure risks market share capital allocation",
         f"{company} growth capacity expansion market penetration innovation "
         "returns on invested capital",
         "actions to grow sustainably competitive advantage reinvestment "

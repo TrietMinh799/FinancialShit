@@ -1,11 +1,12 @@
 """server.py — Flask HTTP server: routes and entry point."""
+
 from __future__ import annotations
 
 import logging
 import uuid
 from pathlib import Path
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
 
 from core.analysis import analyze_report
 from core.config import LLM_BASE_URL, OPENAI_MODEL, ensure_dirs
@@ -105,8 +106,9 @@ PROVIDERS: list[dict] = [
 # Static / HTML
 # ---------------------------------------------------------------------------
 
+
 @app.route("/")
-def index():
+def index() -> Response:
     return send_from_directory("web", "index.html")
 
 
@@ -114,27 +116,44 @@ def index():
 # GET routes
 # ---------------------------------------------------------------------------
 
+
 @app.route("/api/library")
-def library():
+def library() -> Response:
     try:
         return jsonify(Store().stats())
-    except Exception as exc:
+    except Exception:
         logger.exception("library error")
         return jsonify({"error": "Failed to load library."}), 500
 
 
 @app.route("/api/providers")
-def providers():
+def providers() -> Response:
     """Return the list of supported LLM provider presets."""
     return jsonify({"providers": PROVIDERS, "default_base_url": LLM_BASE_URL})
+
+
+@app.route("/api/reindex", methods=["POST"])
+def reindex() -> Response:
+    """Re-embed all stored chunks with the current embedding model.
+
+    Call this once after changing EMBED_MODEL so the vector index matches
+    the new model's embedding space.
+    """
+    try:
+        count = Store().reindex_all()
+        return jsonify({"ok": True, "reindexed_chunks": count})
+    except Exception as exc:
+        logger.exception("reindex error")
+        return jsonify({"error": f"Re-index failed: {exc}"}), 500
 
 
 # ---------------------------------------------------------------------------
 # POST routes
 # ---------------------------------------------------------------------------
 
+
 @app.route("/api/test-key", methods=["POST"])
-def test_key():
+def test_key() -> Response:
     payload = request.get_json(silent=True) or {}
     api_key = clean_text(payload.get("api_key", ""))
     if not api_key:
@@ -143,17 +162,21 @@ def test_key():
     model = payload.get("model") or OPENAI_MODEL
     try:
         ok = test_openai_key(api_key, model, base_url)
-        return jsonify({
-            "ok": ok,
-            "message": "API key works." if ok else "The API key test did not return a response.",
-        })
+        return jsonify(
+            {
+                "ok": ok,
+                "message": "API key works."
+                if ok
+                else "The API key test did not return a response.",
+            }
+        )
     except Exception as exc:
         logger.exception("test-key error")
         return jsonify({"ok": False, "message": str(exc)}), 200
 
 
 @app.route("/api/ask", methods=["POST"])
-def ask():
+def ask() -> Response:
     payload = request.get_json(silent=True) or {}
     question = clean_text(payload.get("question", ""))
     if not question:
@@ -167,18 +190,19 @@ def ask():
             payload.get("base_url") or LLM_BASE_URL,
         )
         return jsonify(result)
-    except Exception as exc:
+    except Exception:
         logger.exception("ask error")
         return jsonify({"error": "Failed to process question."}), 500
 
 
 @app.route("/api/upload-book", methods=["POST"])
-def upload_book():
+def upload_book() -> Response:
     file = request.files.get("book_file")
     if not file or not file.filename:
         return jsonify({"error": "Choose a book PDF, EPUB, DOCX, TXT, or MD file."}), 400
 
     from core.config import UPLOAD_DIR
+
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_filename(file.filename)}"
     file.save(str(target))
 
@@ -186,18 +210,19 @@ def upload_book():
     try:
         result = Store().add_document(target, title, "book")
         return jsonify(result)
-    except Exception as exc:
+    except Exception:
         logger.exception("upload-book error")
         return jsonify({"error": "Failed to process uploaded book."}), 500
 
 
 @app.route("/api/analyze-report", methods=["POST"])
-def analyze_report_route():
+def analyze_report_route() -> Response:
     file = request.files.get("report_file")
     if not file or not file.filename:
         return jsonify({"error": "Choose an annual report PDF."}), 400
 
     from core.config import UPLOAD_DIR
+
     target = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_filename(file.filename)}"
     file.save(str(target))
 
@@ -214,7 +239,7 @@ def analyze_report_route():
             store, company, ticker, api_key, model, base_url
         )
         return jsonify(result)
-    except Exception as exc:
+    except Exception:
         logger.exception("analyze-report error")
         return jsonify({"error": "Failed to analyze report."}), 500
 
@@ -222,6 +247,7 @@ def analyze_report_route():
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     import argparse

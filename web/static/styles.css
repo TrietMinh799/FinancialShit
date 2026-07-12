@@ -646,6 +646,57 @@ textarea {
   padding: 0 4px;
 }
 
+/* Copy button */
+.message-bubble-wrapper {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+.copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  opacity: 0;
+  background: var(--bg-active);
+  border: 1px solid var(--border);
+  transition: opacity var(--transition), background var(--transition), color var(--transition), border-color var(--transition);
+}
+.message-bubble-wrapper:hover .copy-btn,
+.copy-btn:focus {
+  opacity: 1;
+}
+.copy-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  border-color: var(--border-bright);
+}
+.copy-btn.copied {
+  color: var(--accent-green);
+  border-color: rgba(52,211,153,0.4);
+  background: rgba(52,211,153,0.1);
+}
+.message--user .copy-btn {
+  background: rgba(255,255,255,0.12);
+  border-color: rgba(255,255,255,0.15);
+  color: rgba(255,255,255,0.7);
+}
+.message--user .copy-btn:hover {
+  background: rgba(255,255,255,0.2);
+  color: #fff;
+}
+.message--user .copy-btn.copied {
+  color: var(--accent-green);
+  border-color: rgba(52,211,153,0.5);
+  background: rgba(52,211,153,0.15);
+}
+
 /* Source Citations */
 .message-sources {
   display: flex;

@@ -12,15 +12,18 @@ All implementation has been split into focused modules:
 This file re-exports the full public API so that any code that previously
 imported directly from rag_platform continues to work unchanged.
 """
+
 from __future__ import annotations
+
+from core.analysis import analyze_report
 
 # Re-export everything from each module so external callers keep working
 from core.config import (
     DB_PATH,
     EXECUTION_TERMS,
     GROWTH_TERMS,
-    MODEL,
     MOAT_TERMS,
+    MODEL,
     OPENAI_MODEL,
     OPENROUTER_MODELS_URL,
     RISK_TERMS,
@@ -29,6 +32,29 @@ from core.config import (
     STOPWORDS,
     UPLOAD_DIR,
     ensure_dirs,
+)
+from core.extractors import (
+    extract_docx_pages,
+    extract_epub_pages,
+    extract_pages,
+)
+from core.llm import (
+    answer_question,
+    build_context,
+    call_openai_llm,
+    decompose_query,
+    fallback_answer,
+    generate_kb_company_report,
+    parse_structured_report,
+    test_openai_key,
+)
+from core.reranker import rerank
+from core.store import (
+    Store,
+    document_hash,
+    parse_content_disposition,
+    parse_multipart,
+    safe_filename,
 )
 from core.text_utils import (
     annual_hits,
@@ -42,50 +68,59 @@ from core.text_utils import (
     strip_markup,
     unique,
 )
-from core.extractors import (
-    extract_docx_pages,
-    extract_epub_pages,
-    extract_pages,
-)
-from core.store import (
-    Store,
-    document_hash,
-    parse_content_disposition,
-    parse_multipart,
-    safe_filename,
-)
-from core.analysis import analyze_report
-from core.llm import (
-    answer_question,
-    build_context,
-    call_openai_llm,
-    fallback_answer,
-    generate_kb_company_report,
-    parse_structured_report,
-    test_openai_key,
-)
-from server import Handler, HTML, main, write_json
+from server import main
 
 __all__ = [
     # config
-    "DB_PATH", "EXECUTION_TERMS", "GROWTH_TERMS", "MODEL", "MOAT_TERMS",
-    "OPENAI_MODEL", "OPENROUTER_MODELS_URL", "RISK_TERMS", "ROOT", "RUNS",
-    "STOPWORDS", "UPLOAD_DIR", "ensure_dirs",
+    "DB_PATH",
+    "EXECUTION_TERMS",
+    "GROWTH_TERMS",
+    "MODEL",
+    "MOAT_TERMS",
+    "OPENAI_MODEL",
+    "OPENROUTER_MODELS_URL",
+    "RISK_TERMS",
+    "ROOT",
+    "RUNS",
+    "STOPWORDS",
+    "UPLOAD_DIR",
+    "ensure_dirs",
     # text_utils
-    "annual_hits", "chunk_pages", "clean_text", "clip", "matched_labels",
-    "mention_count", "query_terms", "snippet_for", "strip_markup", "unique",
+    "annual_hits",
+    "chunk_pages",
+    "clean_text",
+    "clip",
+    "matched_labels",
+    "mention_count",
+    "query_terms",
+    "snippet_for",
+    "strip_markup",
+    "unique",
     # extractors
-    "extract_docx_pages", "extract_epub_pages", "extract_pages",
+    "extract_docx_pages",
+    "extract_epub_pages",
+    "extract_pages",
     # store
-    "Store", "document_hash", "parse_content_disposition",
-    "parse_multipart", "safe_filename",
+    "Store",
+    "document_hash",
+    "parse_content_disposition",
+    "parse_multipart",
+    "safe_filename",
     # analysis
     "analyze_report",
     # llm
-    "answer_question", "build_context", "call_openai_llm", "fallback_answer",
-    "generate_kb_company_report", "parse_structured_report", "test_openai_key",
+    "answer_question",
+    "build_context",
+    "call_openai_llm",
+    "decompose_query",
+    "fallback_answer",
+    "generate_kb_company_report",
+    "parse_structured_report",
+    "test_openai_key",
+    # reranker
+    "rerank",
     # server
-    "Handler", "HTML", "main", "write_json",
+    "main",
 ]
 
 if __name__ == "__main__":
