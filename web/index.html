@@ -1096,6 +1096,7 @@
     const sit = r.company_situation || {};
     const actions = r.growth_actions || [];
     const lrep = r.llm_report;
+    const reason = r.reasoned_analysis || {};
 
     const scoreHtml = [
       ['Tổng Thể', s.overall_growth_score],
@@ -1105,17 +1106,46 @@
       ['Tài Chính', s.financial_resilience],
     ].map(([l,v]) => `<span class="score-chip">${safe(l)}: <strong>${v}/100</strong></span>`).join('');
 
+    // Score commentary from reasoned analysis
+    let commentaryHtml = '';
+    const comm = reason.score_commentary || {};
+    if (comm.moat || comm.growth || comm.execution || comm.financial || comm.risk) {
+      const commLabels = [
+        ['moat','Lợi Thế Cạnh Tranh','#a78bfa'],
+        ['growth','Tăng Trưởng','#34d399'],
+        ['execution','Thực Thi','#fbbf24'],
+        ['financial','Tài Chính','#60a5fa'],
+        ['risk','Rủi Ro','#f87171'],
+      ];
+      commentaryHtml = commLabels
+        .filter(([k]) => comm[k])
+        .map(([k,l,c]) => `<div style="margin-bottom:8px"><span style="font-size:11px;font-weight:600;color:${c}">${l}</span><p style="margin:2px 0 0;font-size:12.5px;color:var(--text-secondary);line-height:1.5">${safe(comm[k])}</p></div>`)
+        .join('');
+      if (commentaryHtml) {
+        commentaryHtml = `<div class="result-section"><div class="result-section-title">Giải Thích Chi Tiết</div>${commentaryHtml}</div>`;
+      }
+    }
+
+    // SWOT — prefer reasoned SWOT when available, fall back to keyword-based
     const swotColor = {Điểm_Mạnh:'#34d399',Điểm_Yếu:'#f87171',Cơ_Hội:'#818cf8',Thách_Thức:'#fbbf24'};
-    const swotHtml = [
-      ['Điểm_Mạnh','Điểm Mạnh',sit.strengths],
-      ['Điểm_Yếu','Điểm Yếu',sit.weaknesses],
-      ['Cơ_Hội','Cơ Hội',sit.opportunities],
-      ['Thách_Thức','Thách Thức',sit.threats],
-    ].map(([key,label,items]) => `
+    const rswot = reason.reasoned_swot || {};
+    const swotData = [
+      ['Điểm_Mạnh','Điểm Mạnh', rswot.strengths || sit.strengths],
+      ['Điểm_Yếu','Điểm Yếu', rswot.weaknesses || sit.weaknesses],
+      ['Cơ_Hội','Cơ Hội', rswot.opportunities || sit.opportunities],
+      ['Thách_Thức','Thách Thức', rswot.threats || sit.threats],
+    ];
+    const swotHtml = swotData.map(([key,label,items]) => `
       <div class="result-section">
         <div class="result-section-title" style="color:${swotColor[key]}">${label}</div>
         <ul>${(items||[]).map(i=>`<li>${safe(i)}</li>`).join('')||'<li>—</li>'}</ul>
       </div>`).join('');
+
+    // Key considerations from reasoned analysis
+    let keyHtml = '';
+    if (reason.key_considerations) {
+      keyHtml = `<div class="result-section"><div class="result-section-title">Lưu Ý Cho Nhà Phân Tích</div><p style="margin:4px 0 0;font-size:12.5px;color:var(--text-secondary);line-height:1.6">${safe(reason.key_considerations)}</p></div>`;
+    }
 
     const actHtml = actions.length
       ? '<ol style="margin:4px 0 0 16px">' + actions.map(a=>`<li>${safe(a)}</li>`).join('') + '</ol>'
@@ -1146,7 +1176,9 @@
           <div class="result-section-title">Lợi Thế Cạnh Tranh</div>
           <p><strong>${safe(adv.rating||'')}</strong> — ${safe(adv.assessment||'')}</p>
         </div>
+        ${commentaryHtml}
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">${swotHtml}</div>
+        ${keyHtml}
         <div class="result-section" style="margin-top:12px">
           <div class="result-section-title">Hành Động Tăng Trưởng</div>
           ${actHtml}

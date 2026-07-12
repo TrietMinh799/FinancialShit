@@ -234,7 +234,7 @@ def analyze_report_route() -> Response:
 
     try:
         store = Store()
-        result = analyze_report(store, target, company, ticker)
+        result = analyze_report(store, target, company, ticker, api_key, model, base_url)
         result["llm_report"] = generate_kb_company_report(
             store, company, ticker, api_key, model, base_url
         )
