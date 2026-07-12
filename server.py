@@ -1,6 +1,7 @@
 """server.py — Flask HTTP server: routes and entry point."""
 from __future__ import annotations
 
+import logging
 import uuid
 from pathlib import Path
 
@@ -11,6 +12,8 @@ from core.config import LLM_BASE_URL, OPENAI_MODEL, ensure_dirs
 from core.llm import answer_question, generate_kb_company_report, test_openai_key
 from core.store import Store, safe_filename
 from core.text_utils import clean_text, sanitize_field
+
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__, static_folder="web/static", template_folder="web")
 
@@ -116,7 +119,8 @@ def library():
     try:
         return jsonify(Store().stats())
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        logger.exception("library error")
+        return jsonify({"error": "Failed to load library."}), 500
 
 
 @app.route("/api/providers")
@@ -144,6 +148,7 @@ def test_key():
             "message": "API key works." if ok else "The API key test did not return a response.",
         })
     except Exception as exc:
+        logger.exception("test-key error")
         return jsonify({"ok": False, "message": str(exc)}), 200
 
 
@@ -163,7 +168,8 @@ def ask():
         )
         return jsonify(result)
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        logger.exception("ask error")
+        return jsonify({"error": "Failed to process question."}), 500
 
 
 @app.route("/api/upload-book", methods=["POST"])
@@ -181,7 +187,8 @@ def upload_book():
         result = Store().add_document(target, title, "book")
         return jsonify(result)
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        logger.exception("upload-book error")
+        return jsonify({"error": "Failed to process uploaded book."}), 500
 
 
 @app.route("/api/analyze-report", methods=["POST"])
@@ -208,7 +215,8 @@ def analyze_report_route():
         )
         return jsonify(result)
     except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
+        logger.exception("analyze-report error")
+        return jsonify({"error": "Failed to analyze report."}), 500
 
 
 # ---------------------------------------------------------------------------

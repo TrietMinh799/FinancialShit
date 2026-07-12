@@ -96,7 +96,6 @@ def call_openai_llm(
 
     Returns the assistant text, or ``None`` if no API key is configured.
     """
-    api_key = api_key or os.environ.get("OPENAI_API_KEY")
     model = model or OPENAI_MODEL
     base_url = (base_url or LLM_BASE_URL).rstrip("/")
     if not api_key:
@@ -201,7 +200,7 @@ def answer_question(
     mode = "rag"
     mode_label = "Evidence-based answer"
 
-    if citations and (api_key or os.environ.get("OPENAI_API_KEY")):
+    if citations and api_key:
         try:
             answer = call_openai_llm(question, citations, api_key, model, base_url)
             if answer:
