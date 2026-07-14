@@ -447,6 +447,13 @@
     .lib-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
     .lib-dot--book   { background: #34d399; }
     .lib-dot--report { background: #60a5fa; }
+    .lib-del {
+      background: none; border: none; color: var(--text-muted); cursor: pointer;
+      font-size: 13px; line-height: 1; padding: 0 2px; opacity: 0;
+      transition: opacity .2s, color .2s; flex-shrink: 0;
+    }
+    .lib-item:hover .lib-del { opacity: 1; }
+    .lib-del:hover { color: #f87171; }
 
     /* ── Remember checkbox ── */
     .remember-row {
@@ -500,44 +507,11 @@
           LLM Provider
         </div>
 
-        <!-- Provider grid -->
-        <div class="provider-grid" id="providerGrid">
-          <!-- populated by JS from /api/providers -->
-          <div style="grid-column:1/-1;font-size:11.5px;color:var(--text-muted)">Đang tải…</div>
-        </div>
-
-        <!-- Custom base URL (shown only for "custom" provider) -->
-        <div id="customUrlRow" style="display:none;margin-bottom:8px">
-          <label class="field-label" style="margin-bottom:4px">Base URL</label>
-          <input id="customBaseUrl" class="field-input" placeholder="http://localhost:11434/v1" style="padding:7px 10px;font-size:12.5px" />
-        </div>
-
-        <!-- Model selector -->
-        <div style="margin-bottom:8px">
-          <label class="field-label" style="margin-bottom:4px">Mô hình</label>
-          <select id="modelSelect" class="model-select">
-            <option value="">-- chọn mô hình --</option>
-          </select>
-          <input id="modelCustom" class="field-input" placeholder="Hoặc nhập tên mô hình…" style="padding:7px 10px;font-size:12.5px;margin-top:6px;display:none" />
-        </div>
-
-        <!-- API Key -->
-        <label class="field-label" style="margin-bottom:4px">API Key</label>
-        <div class="api-key-row">
-          <div class="api-key-dot" id="apiKeyDot"></div>
-          <input id="apiKey" type="password" placeholder="Dán API key tại đây…" autocomplete="off" />
-        </div>
-        <div style="padding:4px 0 0 2px">
-          <label class="remember-row">
-            <input id="rememberKey" type="checkbox" /> Ghi nhớ trong trình duyệt
-          </label>
-        </div>
-
-        <button class="tool-btn" id="testKeyBtn" style="margin-top:8px;font-size:12px">
+        <button class="tool-btn" id="openSettingsBtn" style="margin-top:2px;font-size:12px">
           <span class="tool-btn-icon icon--violet">
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M4.22 7.22l2.12 2.12"/><path d="M17.66 17.66l2.12 2.12"/><path d="M3 12h3"/><path d="M18 12h3"/><path d="M4.22 16.78l2.12-2.12"/><path d="M17.66 6.34l2.12-2.12"/><circle cx="12" cy="12" r="3.5"/></svg>
           </span>
-          Kiểm tra kết nối
+          Cài đặt LLM
         </button>
       </div>
 
@@ -623,6 +597,12 @@
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
             </span>
             Phân Tích
+          </button>
+          <button class="tool-btn" id="headerOpenSettings" style="width:auto;padding:0 12px;min-height:34px;font-size:12.5px;margin:0">
+            <span class="tool-btn-icon icon--violet" style="width:22px;height:22px;border-radius:6px">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 3v3"/><path d="M12 18v3"/><path d="M4.22 7.22l2.12 2.12"/><path d="M17.66 17.66l2.12 2.12"/><path d="M3 12h3"/><path d="M18 12h3"/><path d="M4.22 16.78l2.12-2.12"/><path d="M17.66 6.34l2.12-2.12"/><circle cx="12" cy="12" r="3.5"/></svg>
+            </span>
+            Cài Đặt
           </button>
         </div>
       </header>
@@ -748,547 +728,46 @@
     </div>
   </div>
 
-  <script>
-  /* ====================================================
-     app.js — Valuation RAG Chatbot (Flask + multi-LLM)
-  ==================================================== */
-
-  const $ = id => document.getElementById(id);
-  const safe = v => String(v ?? '').replace(/[&<>"']/g, c =>
-    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-
-  let isSending   = false;
-  let typingEl    = null;
-  let providers   = [];          // filled from /api/providers
-  let activeProvider = null;     // currently selected provider object
-
-  // ── Provider & model helpers ───────────────────────
-  function baseUrl() {
-    if (!activeProvider) return '';
-    if (activeProvider.id === 'custom') return $('customBaseUrl').value.trim();
-    return activeProvider.base_url;
-  }
-
-  function apiKey()   { return $('apiKey').value.trim(); }
-
-  function apiModel() {
-    const sel = $('modelSelect').value;
-    if (sel === '__custom__') return $('modelCustom').value.trim();
-    return sel || $('modelCustom').value.trim() || '';
-  }
-
-  // ── Persist / restore settings ─────────────────────
-  function loadSettings() {
-    const pid   = localStorage.getItem('rag_provider_id') || 'openai';
-    const key   = localStorage.getItem('rag_api_key') || '';
-    const model = localStorage.getItem('rag_model') || '';
-    const curl  = localStorage.getItem('rag_custom_url') || '';
-
-    if (key)  { $('apiKey').value = key; $('rememberKey').checked = true; }
-    if (curl)   $('customBaseUrl').value = curl;
-
-    // activate stored provider after providers are loaded
-    return { pid, model };
-  }
-
-  function saveSettings() {
-    if ($('rememberKey').checked) localStorage.setItem('rag_api_key', apiKey());
-    else localStorage.removeItem('rag_api_key');
-    localStorage.setItem('rag_model', apiModel());
-    localStorage.setItem('rag_custom_url', $('customBaseUrl').value.trim());
-    if (activeProvider) localStorage.setItem('rag_provider_id', activeProvider.id);
-  }
-
-  function setStatus(txt) { $('statusText').textContent = txt; }
-
-  async function readJson(res) {
-    const d = await res.json();
-    if (!res.ok) throw new Error(d.error || 'Request failed');
-    return d;
-  }
-
-  // ── API key dot ────────────────────────────────────
-  function setKeyDot(state) {
-    $('apiKeyDot').className = 'api-key-dot' + (state ? ' ' + state : '');
-  }
-
-  // ── Load providers from backend ────────────────────
-  async function loadProviders() {
-    try {
-      const data = await fetch('/api/providers').then(r => r.json());
-      providers = data.providers || [];
-      const { pid, model } = loadSettings();
-      renderProviderGrid(pid, model);
-    } catch(e) {
-      $('providerGrid').innerHTML = '<div style="font-size:11.5px;color:#f87171;grid-column:1/-1">Không thể tải providers</div>';
-    }
-  }
-
-  function renderProviderGrid(activePid, savedModel) {
-    const grid = $('providerGrid');
-    grid.innerHTML = providers.map(p => `
-      <button class="provider-btn${p.id === activePid ? ' active' : ''}"
-              data-id="${safe(p.id)}"
-              style="--provider-color:${safe(p.color)}">
-        <span class="provider-dot" style="background:${safe(p.color)}"></span>
-        ${safe(p.label)}
-      </button>`).join('');
-
-    grid.querySelectorAll('.provider-btn').forEach(btn => {
-      btn.addEventListener('click', () => selectProvider(btn.dataset.id, ''));
-    });
-
-    // activate
-    selectProvider(activePid, savedModel);
-  }
-
-  function selectProvider(pid, preferredModel) {
-    const p = providers.find(x => x.id === pid) || providers[0];
-    if (!p) return;
-    activeProvider = p;
-
-    // update button states
-    $('providerGrid').querySelectorAll('.provider-btn').forEach(btn => {
-      btn.classList.toggle('active', btn.dataset.id === p.id);
-      btn.style.setProperty('--provider-color', p.color);
-    });
-
-    // show/hide custom URL row
-    $('customUrlRow').style.display = p.id === 'custom' ? '' : 'none';
-
-    // populate model selector
-    const sel = $('modelSelect');
-    sel.innerHTML = p.models.map(m =>
-      `<option value="${safe(m)}">${safe(m)}</option>`
-    ).join('') + '<option value="__custom__">Nhập tên khác…</option>';
-
-    // restore saved model or default to first
-    const target = preferredModel || p.models[0] || '';
-    if (p.models.includes(target)) {
-      sel.value = target;
-      $('modelCustom').style.display = 'none';
-    } else if (target) {
-      sel.value = '__custom__';
-      $('modelCustom').value = target;
-      $('modelCustom').style.display = '';
-    } else {
-      sel.value = p.models[0] || '';
-      $('modelCustom').style.display = 'none';
-    }
-
-    // update key placeholder
-    $('apiKey').placeholder = p.key_placeholder || 'API key…';
-
-    setKeyDot('');
-  }
-
-  $('modelSelect') && document.addEventListener('DOMContentLoaded', () => {
-    $('modelSelect').addEventListener('change', () => {
-      $('modelCustom').style.display = $('modelSelect').value === '__custom__' ? '' : 'none';
-    });
-  });
-
-  // ── Library ────────────────────────────────────────
-  async function loadLibrary() {
-    try {
-      const data = await fetch('/api/library').then(readJson);
-      $('libCount').textContent = data.documents;
-      const docs = data.recent_documents || [];
-      $('sidebarDocs').innerHTML = docs.length
-        ? docs.map(d => `
-            <div class="lib-item">
-              <span class="lib-dot lib-dot--${d.source_type === 'book' ? 'book' : 'report'}"></span>
-              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${safe(d.title)}</span>
-              <span style="flex-shrink:0;font-size:10.5px;color:var(--text-muted)">${d.page_count}tr</span>
-            </div>`).join('')
-        : '<p style="font-size:11.5px;color:var(--text-muted);padding:0 4px">Chưa có tài liệu</p>';
-    } catch(e) {
-      $('sidebarDocs').innerHTML = `<p style="font-size:11.5px;color:#f87171;padding:0 4px">${safe(e.message)}</p>`;
-    }
-  }
-
-  // ── Welcome screen ─────────────────────────────────
-  function setWelcome(visible) {
-    $('welcomeScreen').style.display = visible ? 'flex' : 'none';
-  }
-
-  // ── Message rendering ──────────────────────────────
-  function appendMessage(role, html, sources = []) {
-    setWelcome(false);
-    const now = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-    const wrap = document.createElement('div');
-    wrap.className = `message message--${role}`;
-
-    const av = document.createElement('div');
-    av.className = 'message-avatar';
-    av.textContent = role === 'user' ? 'U' : 'AI';
-
-    const cont = document.createElement('div');
-    cont.className = 'message-content';
-
-    const bub = document.createElement('div');
-    bub.className = 'message-bubble';
-    bub.innerHTML = html;
-
-    const meta = document.createElement('div');
-    meta.className = 'message-meta';
-    meta.textContent = now + (activeProvider ? ` · ${activeProvider.label}` : '');
-
-    cont.appendChild(bub);
-
-    if (role === 'bot' && sources.length) {
-      const src = document.createElement('div');
-      src.className = 'message-sources';
-      sources.forEach(s => {
-        const t = document.createElement('span');
-        t.className = 'source-tag';
-        t.textContent = s;
-        src.appendChild(t);
-      });
-      cont.appendChild(src);
-    }
-
-    cont.appendChild(meta);
-    wrap.appendChild(av);
-    wrap.appendChild(cont);
-    $('messagesList').appendChild(wrap);
-    scrollBottom();
-  }
-
-  function appendUserMessage(text) {
-    appendMessage('user', safe(text).replace(/\n/g,'<br>'));
-  }
-  function appendBotText(text, sources = []) {
-    appendMessage('bot', safe(text).replace(/\n/g,'<br>'), sources);
-  }
-  function appendBotHtml(html, sources = []) {
-    appendMessage('bot', html, sources);
-  }
-
-  function scrollBottom() {
-    const body = $('chatBody');
-    body.scrollTo({top: body.scrollHeight, behavior: 'smooth'});
-  }
-
-  // ── Typing indicator ───────────────────────────────
-  function showTyping() {
-    if (typingEl) return;
-    typingEl = document.createElement('div');
-    typingEl.className = 'typing-indicator';
-
-    const av = document.createElement('div');
-    av.className = 'message-avatar';
-    av.style.cssText = 'width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;margin-top:4px;background:linear-gradient(135deg,#6366f1,#a855f7);color:#fff';
-    av.textContent = 'AI';
-
-    const bub = document.createElement('div');
-    bub.className = 'typing-bubble';
-    for (let i=0;i<3;i++) {
-      const d = document.createElement('span');
-      d.className = 'typing-dot';
-      bub.appendChild(d);
-    }
-
-    typingEl.appendChild(av);
-    typingEl.appendChild(bub);
-    $('typingAnchor').appendChild(typingEl);
-    scrollBottom();
-  }
-
-  function hideTyping() {
-    if (typingEl) { typingEl.remove(); typingEl = null; }
-  }
-
-  // ── Send question ──────────────────────────────────
-  async function sendQuestion(question) {
-    if (!question || isSending) return;
-    appendUserMessage(question);
-    isSending = true; updateSendBtn();
-    showTyping();
-    saveSettings();
-
-    try {
-      setStatus(`Đang truy xuất · ${activeProvider?.label || ''}…`);
-      const result = await fetch('/api/ask', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          question,
-          api_key:  apiKey(),
-          model:    apiModel(),
-          base_url: baseUrl(),
-        })
-      }).then(readJson);
-
-      hideTyping();
-      const sources = (result.citations || []).map(c => c.title || 'Nguồn');
-      appendBotText(result.answer, sources);
-      setStatus(result.mode === 'llm' ? 'Câu trả lời LLM ✓' : 'Câu trả lời bằng chứng ✓');
-    } catch(err) {
-      hideTyping();
-      appendBotText('Lỗi: ' + err.message);
-      setStatus('Lỗi');
-    }
-
-    isSending = false; updateSendBtn();
-  }
-
-  // ── Upload book ────────────────────────────────────
-  async function submitBook() {
-    const file = $('bookFile').files[0];
-    if (!file) { alert('Vui lòng chọn tệp sách.'); return; }
-    closeModal('bookModal');
-    appendBotHtml(`<span style="color:var(--text-muted)">⏳ Đang thêm sách <strong>${safe(file.name)}</strong> vào RAG…</span>`);
-    setStatus('Đang thêm sách…');
-
-    const fd = new FormData();
-    fd.append('book_file', file);
-    fd.append('book_title', $('bookTitle').value.trim() || file.name.replace(/\.[^.]+$/,''));
-
-    try {
-      const result = await fetch('/api/upload-book', {method:'POST', body:fd}).then(readJson);
-      const msg = result.inserted
-        ? `✅ Đã thêm sách "${safe(result.title)}" — ${result.page_count} trang, ${result.chunk_count} đoạn.`
-        : `ℹ️ Sách "${safe(result.title)}" đã có trong thư viện (${result.chunk_count} đoạn).`;
-      appendBotText(msg);
-      setStatus('Đã thêm sách ✓');
-      await loadLibrary();
-    } catch(err) {
-      appendBotText('Lỗi khi thêm sách: ' + err.message);
-      setStatus('Lỗi');
-    }
-  }
-
-  // ── Analyze report ─────────────────────────────────
-  async function submitReport() {
-    const file = $('reportFile').files[0];
-    if (!file) { alert('Vui lòng chọn file PDF báo cáo.'); return; }
-    const company = $('reportCompany').value.trim() || 'Công ty';
-    const ticker  = $('reportTicker').value.trim()  || 'N/A';
-    closeModal('reportModal');
-
-    appendBotHtml(`<span style="color:var(--text-muted)">⏳ Đang phân tích báo cáo của <strong>${safe(company)} (${safe(ticker)})</strong> qua <strong>${safe(activeProvider?.label||'LLM')}</strong>…</span>`);
-    setStatus('Đang phân tích…');
-    saveSettings();
-
-    const fd = new FormData();
-    fd.append('report_file', file);
-    fd.append('company', company);
-    fd.append('ticker', ticker);
-    fd.append('api_key',  apiKey());
-    fd.append('model',    apiModel());
-    fd.append('base_url', baseUrl());
-
-    try {
-      const r = await fetch('/api/analyze-report', {method:'POST', body:fd}).then(readJson);
-      renderAnalysis(r, company, ticker);
-      setStatus('Phân tích hoàn tất ✓');
-      await loadLibrary();
-    } catch(err) {
-      appendBotText('Lỗi khi phân tích: ' + err.message);
-      setStatus('Lỗi');
-    }
-  }
-
-  function renderAnalysis(r, company, ticker) {
-    const s = r.scores || {};
-    const adv = r.competitive_advantage || {};
-    const sit = r.company_situation || {};
-    const actions = r.growth_actions || [];
-    const lrep = r.llm_report;
-    const reason = r.reasoned_analysis || {};
-
-    const scoreHtml = [
-      ['Tổng Thể', s.overall_growth_score],
-      ['Lợi Thế', s.moat_sustainability],
-      ['Tăng Trưởng', s.growth_capacity],
-      ['Thực Thi', s.execution_quality],
-      ['Tài Chính', s.financial_resilience],
-    ].map(([l,v]) => `<span class="score-chip">${safe(l)}: <strong>${v}/100</strong></span>`).join('');
-
-    // Score commentary from reasoned analysis
-    let commentaryHtml = '';
-    const comm = reason.score_commentary || {};
-    if (comm.moat || comm.growth || comm.execution || comm.financial || comm.risk) {
-      const commLabels = [
-        ['moat','Lợi Thế Cạnh Tranh','#a78bfa'],
-        ['growth','Tăng Trưởng','#34d399'],
-        ['execution','Thực Thi','#fbbf24'],
-        ['financial','Tài Chính','#60a5fa'],
-        ['risk','Rủi Ro','#f87171'],
-      ];
-      commentaryHtml = commLabels
-        .filter(([k]) => comm[k])
-        .map(([k,l,c]) => `<div style="margin-bottom:8px"><span style="font-size:11px;font-weight:600;color:${c}">${l}</span><p style="margin:2px 0 0;font-size:12.5px;color:var(--text-secondary);line-height:1.5">${safe(comm[k])}</p></div>`)
-        .join('');
-      if (commentaryHtml) {
-        commentaryHtml = `<div class="result-section"><div class="result-section-title">Giải Thích Chi Tiết</div>${commentaryHtml}</div>`;
-      }
-    }
-
-    // SWOT — prefer reasoned SWOT when available, fall back to keyword-based
-    const swotColor = {Điểm_Mạnh:'#34d399',Điểm_Yếu:'#f87171',Cơ_Hội:'#818cf8',Thách_Thức:'#fbbf24'};
-    const rswot = reason.reasoned_swot || {};
-    const swotData = [
-      ['Điểm_Mạnh','Điểm Mạnh', rswot.strengths || sit.strengths],
-      ['Điểm_Yếu','Điểm Yếu', rswot.weaknesses || sit.weaknesses],
-      ['Cơ_Hội','Cơ Hội', rswot.opportunities || sit.opportunities],
-      ['Thách_Thức','Thách Thức', rswot.threats || sit.threats],
-    ];
-    const swotHtml = swotData.map(([key,label,items]) => `
-      <div class="result-section">
-        <div class="result-section-title" style="color:${swotColor[key]}">${label}</div>
-        <ul>${(items||[]).map(i=>`<li>${safe(i)}</li>`).join('')||'<li>—</li>'}</ul>
-      </div>`).join('');
-
-    // Key considerations from reasoned analysis
-    let keyHtml = '';
-    if (reason.key_considerations) {
-      keyHtml = `<div class="result-section"><div class="result-section-title">Lưu Ý Cho Nhà Phân Tích</div><p style="margin:4px 0 0;font-size:12.5px;color:var(--text-secondary);line-height:1.6">${safe(reason.key_considerations)}</p></div>`;
-    }
-
-    const actHtml = actions.length
-      ? '<ol style="margin:4px 0 0 16px">' + actions.map(a=>`<li>${safe(a)}</li>`).join('') + '</ol>'
-      : '<p style="color:var(--text-muted)">Không có hành động</p>';
-
-    let repHtml = '';
-    if (lrep && lrep.sections) {
-      const sec = lrep.sections;
-      const titles = [
-        ['qualitative_report','Báo Cáo Định Tính'],
-        ['quantitative_report','Báo Cáo Định Lượng'],
-        ['valuation_method_rules','Quy Tắc Định Giá'],
-        ['excel_model_format','Mô Hình Excel'],
-        ['recommended_next_steps','Bước Tiếp Theo'],
-      ];
-      repHtml = `<div class="result-section"><div class="result-section-title">Báo Cáo KB (${safe(lrep.mode_label||'')})</div>`
-        + titles.map(([k,l])=> sec[k]
-          ? `<div style="margin-bottom:10px"><span style="font-size:11.5px;font-weight:600;color:var(--text-primary)">${l}</span><p style="margin:4px 0 0;font-size:12.5px;color:var(--text-secondary);line-height:1.6">${safe(sec[k])}</p></div>`
-          : '').join('')
-        + '</div>';
-    }
-
-    appendBotHtml(`
-      <div class="result-card">
-        <h4>📊 Phân Tích: ${safe(company)} (${safe(ticker)})</h4>
-        <div class="score-row">${scoreHtml}</div>
-        <div class="result-section">
-          <div class="result-section-title">Lợi Thế Cạnh Tranh</div>
-          <p><strong>${safe(adv.rating||'')}</strong> — ${safe(adv.assessment||'')}</p>
-        </div>
-        ${commentaryHtml}
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">${swotHtml}</div>
-        ${keyHtml}
-        <div class="result-section" style="margin-top:12px">
-          <div class="result-section-title">Hành Động Tăng Trưởng</div>
-          ${actHtml}
-        </div>
-        ${repHtml}
-      </div>`);
-    appendBotText(`Phân tích ${company} hoàn tất. Bạn có thể hỏi tôi bất kỳ câu hỏi nào về báo cáo này.`);
-  }
-
-  // ── Test key ───────────────────────────────────────
-  async function testKey() {
-    saveSettings();
-    if (!apiKey()) { alert('Vui lòng dán API key trước.'); return; }
-    setStatus('Đang kiểm tra…'); setKeyDot('');
-    try {
-      const r = await fetch('/api/test-key', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({api_key: apiKey(), model: apiModel(), base_url: baseUrl()})
-      }).then(r => r.json());
-      setKeyDot(r.ok ? 'ok' : 'err');
-      setStatus(r.ok ? `${activeProvider?.label||'API'} ✓` : 'Kết nối thất bại');
-      alert(r.message);
-    } catch(e) {
-      setKeyDot('err'); setStatus('Lỗi'); alert(e.message);
-    }
-  }
-
-  // ── Input helpers ──────────────────────────────────
-  function autoResize() {
-    const t = $('userInput');
-    t.style.height = 'auto';
-    t.style.height = Math.min(t.scrollHeight, 180) + 'px';
-  }
-  function updateSendBtn() {
-    $('sendButton').disabled = !$('userInput').value.trim() || isSending;
-  }
-
-  // ── Modal helpers ──────────────────────────────────
-  function openModal(id)  { $(id).classList.add('open'); }
-  function closeModal(id) { $(id).classList.remove('open'); }
-
-  // ── Sidebar ────────────────────────────────────────
-  function openSidebar() {
-    $('sidebar').classList.add('open');
-    $('sidebarOverlay').classList.add('open');
-    document.body.style.overflow = 'hidden';
-  }
-  function closeSidebar() {
-    $('sidebar').classList.remove('open');
-    $('sidebarOverlay').classList.remove('open');
-    document.body.style.overflow = '';
-  }
-
-  function clearChat() {
-    $('messagesList').innerHTML = '';
-    setWelcome(true);
-  }
-
-  // ── Event wiring ───────────────────────────────────
-  $('sendButton').addEventListener('click', () => {
-    const q = $('userInput').value.trim();
-    if (!q) return;
-    $('userInput').value = '';
-    $('userInput').style.height = 'auto';
-    updateSendBtn();
-    sendQuestion(q);
-  });
-
-  $('userInput').addEventListener('input', () => { autoResize(); updateSendBtn(); });
-  $('userInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('sendButton').click(); }
-  });
-
-  document.querySelectorAll('.starter-card').forEach(c => {
-    c.addEventListener('click', () => {
-      const p = c.dataset.prompt;
-      if (p) { $('userInput').value = p; autoResize(); updateSendBtn(); $('sendButton').click(); }
-    });
-  });
-
-  $('modelSelect').addEventListener('change', () => {
-    $('modelCustom').style.display = $('modelSelect').value === '__custom__' ? '' : 'none';
-  });
-
-  $('menuBtn').addEventListener('click', openSidebar);
-  $('sidebarCloseBtn').addEventListener('click', closeSidebar);
-  $('sidebarOverlay').addEventListener('click', closeSidebar);
-
-  $('openBookModal').addEventListener('click', () => { closeSidebar(); openModal('bookModal'); });
-  $('headerUploadBook').addEventListener('click', () => openModal('bookModal'));
-  $('openReportModal').addEventListener('click', () => { closeSidebar(); openModal('reportModal'); });
-  $('headerAnalyzeReport').addEventListener('click', () => openModal('reportModal'));
-  $('clearChatBtn').addEventListener('click', () => { closeSidebar(); clearChat(); });
-  $('testKeyBtn').addEventListener('click', testKey);
-  $('refreshLibBtn').addEventListener('click', () => loadLibrary().catch(console.error));
-  $('apiKey').addEventListener('change', () => setKeyDot(''));
-
-  $('bookModalClose').addEventListener('click', () => closeModal('bookModal'));
-  $('bookSubmit').addEventListener('click', submitBook);
-  $('reportModalClose').addEventListener('click', () => closeModal('reportModal'));
-  $('reportSubmit').addEventListener('click', submitReport);
-
-  $('bookModal').addEventListener('click', e => { if (e.target === $('bookModal')) closeModal('bookModal'); });
-  $('reportModal').addEventListener('click', e => { if (e.target === $('reportModal')) closeModal('reportModal'); });
-
-  // ── Init ───────────────────────────────────────────
-  updateSendBtn();
-  setWelcome(true);
-  loadProviders();           // renders provider grid + restores settings
-  loadLibrary().catch(console.error);
-  </script>
+  <!-- ── MODAL: Settings ── -->
+  <div class="modal-backdrop" id="settingsModal">
+    <div class="modal">
+      <p class="modal-title">Cài Đặt LLM</p>
+      <p class="modal-subtitle">Tùy chỉnh nhà cung cấp, URL và mô hình cho các truy vấn RAG.</p>
+
+      <div class="provider-grid" id="settingsProviderGrid">
+        <div style="grid-column:1/-1;font-size:11.5px;color:var(--text-muted)">Đang tải…</div>
+      </div>
+
+      <div id="settingsCustomUrlRow" style="display:none;margin-bottom:8px">
+        <label class="field-label" style="margin-bottom:4px">Base URL</label>
+        <input id="settingsCustomBaseUrl" class="field-input" placeholder="http://localhost:11434/v1" style="padding:7px 10px;font-size:12.5px" />
+      </div>
+
+      <div style="margin-bottom:8px">
+        <label class="field-label" style="margin-bottom:4px">Mô hình</label>
+        <select id="settingsModelSelect" class="model-select">
+          <option value="">-- chọn mô hình --</option>
+        </select>
+        <input id="settingsModelCustom" class="field-input" placeholder="Hoặc nhập tên mô hình…" style="padding:7px 10px;font-size:12.5px;margin-top:6px;display:none" />
+      </div>
+
+      <label class="field-label" style="margin-bottom:4px">API Key</label>
+      <div class="api-key-row">
+        <div class="api-key-dot" id="settingsApiKeyDot"></div>
+        <input id="settingsApiKey" type="password" placeholder="Dán API key tại đây…" autocomplete="off" />
+      </div>
+      <label class="remember-row">
+        <input id="settingsRememberKey" type="checkbox" /> Ghi nhớ trong trình duyệt
+      </label>
+
+      <div class="modal-actions" style="margin-top:4px">
+        <button class="btn-cancel" id="settingsModalClose">Đóng</button>
+        <button class="btn-submit" id="settingsTestBtn">Kiểm tra</button>
+        <button class="btn-submit" id="settingsSaveBtn">Lưu</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js" defer></script>
 </body>
 </html>

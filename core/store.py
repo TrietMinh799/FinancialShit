@@ -306,6 +306,25 @@ class Store:
             "recent_documents": [dict(row) for row in recent],
         }
 
+    def delete_document(self, document_id: int) -> dict:
+        """Remove a document and its chunks from SQLite, FTS, ChromaDB, and disk."""
+        with self._connect() as conn:
+            doc = conn.execute(
+                "SELECT id, filename FROM documents WHERE id = ?", (document_id,)
+            ).fetchone()
+            if not doc:
+                raise ValueError(f"Document {document_id} not found.")
+
+            self.vector_store().delete_document(document_id)
+
+            conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+
+        fpath = UPLOAD_DIR / doc["filename"]
+        if fpath.exists():
+            fpath.unlink()
+
+        return {"ok": True, "document_id": document_id}
+
     def search(
         self,
         query: str,

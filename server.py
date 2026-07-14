@@ -126,6 +126,18 @@ def library() -> Response:
         return jsonify({"error": "Failed to load library."}), 500
 
 
+@app.route("/api/books/<int:doc_id>", methods=["DELETE"])
+def delete_book(doc_id: int) -> Response:
+    try:
+        result = Store().delete_document(doc_id)
+        return jsonify(result)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 404
+    except Exception:
+        logger.exception("delete-book error")
+        return jsonify({"error": "Failed to delete document."}), 500
+
+
 @app.route("/api/providers")
 def providers() -> Response:
     """Return the list of supported LLM provider presets."""
