@@ -12,7 +12,9 @@ from pathlib import Path
 from core.config import (
     EXECUTION_TERMS,
     GROWTH_TERMS,
+    MAX_RUNS,
     MOAT_TERMS,
+    RERANK_TOP_K,
     RISK_TERMS,
     RUNS,
 )
@@ -295,7 +297,7 @@ def reason_analysis(
         rerank_query = (
             f"{company} moat growth risk valuation ROIC WACC competitive advantage"
         )
-        book_cites = rerank(rerank_query, book_cites, top_k=5)
+        book_cites = rerank(rerank_query, book_cites, top_k=RERANK_TOP_K)
 
     prompt, citations = _build_reasoning_prompt(
         company, ticker,
@@ -431,4 +433,7 @@ def analyze_report(
         result["reasoned_analysis"] = reasoned
 
     RUNS[result["run_id"]] = result
+    RUNS.move_to_end(result["run_id"])
+    while len(RUNS) > MAX_RUNS:
+        RUNS.popitem(last=False)
     return result

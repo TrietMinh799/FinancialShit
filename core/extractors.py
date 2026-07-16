@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import zipfile
 from pathlib import Path
+from typing import Any
 
 from pypdf import PdfReader
 
@@ -11,19 +13,137 @@ from core.text_utils import clean_text
 
 # lxml is optional but ~5-10x faster for XML/HTML parsing
 try:
-    from lxml import etree as LET
-    from lxml.html import fromstring as html_fromstring
+    from lxml import etree as _lxml_etree
     LXML_AVAILABLE = True
-except Exception:  # pragma: no cover
-    from xml.etree import ElementTree as LET
+except Exception:
+    _lxml_etree = None
     LXML_AVAILABLE = False
-    def html_fromstring(data: str):
-        """Fallback: strip tags with regex (slow)."""
-        import re
-        return re.sub(r"(?s)<[^>]+>", " ", data)
+
+_NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+
 
 # ---------------------------------------------------------------------------
-# DOCX extractor (optimized with lxml iterparse / XPath)
+# XML / HTML helpers (unified wrappers so Pylance sees consistent signatures)
+# ---------------------------------------------------------------------------
+
+
+def _xml_parse(data: bytes) -> Any:
+    """Parse *data* as XML and return the root element.
+
+    Uses lxml when available, otherwise falls back to stdlib
+    ``xml.etree.ElementTree``.
+    """
+    if _lxml_etree is not None:
+        return _lxml_etree.fromstring(data)
+    import xml.etree.ElementTree as _ET
+
+    return _ET.fromstring(data)
+
+
+def _iter_xml_text(data: bytes) -> list[str]:
+    """Walk XML *data* and collect all ``<w:t>`` text nodes.
+
+    Uses lxml's fast C iterparse when available; falls back to stdlib
+    ``ElementTree.iterparse`` which is slower but functionally equivalent.
+    """
+    parts: list[str] = []
+    tag = f"{{{_NS_W}}}t"
+    if _lxml_etree is not None:
+        for _, elem in _lxml_etree.iterparse(data, tag=tag, events=("end",)):
+            if elem.text:
+                parts.append(elem.text)
+            elem.clear()
+    else:
+        import xml.etree.ElementTree as _ET
+
+        for _, elem in _ET.iterparse(data, events=("end",)):
+            if elem.tag == tag and elem.text:
+                parts.append(elem.text)
+            elem.clear()
+    return parts
+
+
+def _html_text(data: str | bytes) -> str:
+    """Extract visible text from an HTML document, stripping markup.
+
+    Uses lxml's fast HTML parser when available; falls back to a
+    simple regex tag-stripper on decoding errors or missing lxml.
+    """
+    if _lxml_etree is not None:
+        try:
+            from lxml.html import fromstring as _fromstring
+
+            doc = _fromstring(data)
+            return clean_text(doc.text_content())
+        except Exception:
+            pass
+    if isinstance(data, bytes):
+        data = data.decode("utf-8", errors="ignore")
+    return clean_text(re.sub(r"(?s)<[^>]+>", " ", data))
+
+
+# ---------------------------------------------------------------------------
+# OPF helpers (EPUB package document)
+# ---------------------------------------------------------------------------
+
+
+def _parse_opf_manifest(
+    root: Any,
+    base: str,
+) -> dict[str, str]:
+    """Extract ``id -> href`` mapping from an OPF ``<manifest>``.
+
+    Only entries whose ``media-type`` contains ``html`` or whose ``href``
+    ends with ``.html`` / ``.xhtml`` / ``.htm`` are included.
+    """
+    manifest: dict[str, str] = {}
+
+    if _lxml_etree is not None:
+        items = root.xpath("//*[local-name()='item']")
+        for item in items:
+            item_id: str | None = item.get("id")
+            href: str | None = item.get("href")
+            media_type: str | None = item.get("media-type") or ""
+            if not item_id or not href:
+                continue
+            if "html" in media_type or href.lower().endswith((".html", ".xhtml", ".htm")):
+                manifest[item_id] = f"{base}/{href}".lstrip("/") if base else href
+    else:
+        for child in root.iter():
+            tag = child.tag.split("}", 1)[-1]
+            if tag != "item":
+                continue
+            item_id = child.get("id")
+            href = child.get("href")
+            media_type = child.get("media-type", "")
+            if not item_id or not href:
+                continue
+            if "html" in media_type or href.lower().endswith((".html", ".xhtml", ".htm")):
+                manifest[item_id] = f"{base}/{href}".lstrip("/") if base else href
+
+    return manifest
+
+
+def _parse_opf_spine(root: Any) -> list[str]:
+    """Extract the ordered list of ``idref`` values from an OPF ``<spine>``."""
+    spine: list[str] = []
+
+    if _lxml_etree is not None:
+        refs = root.xpath("//*[local-name()='itemref']")
+        spine = [r.get("idref") for r in refs if r.get("idref")]
+    else:
+        for child in root.iter():
+            tag = child.tag.split("}", 1)[-1]
+            if tag == "itemref":
+                idref = child.get("idref")
+                if idref:
+                    spine.append(idref)
+
+    return spine
+
+
+# ---------------------------------------------------------------------------
+# DOCX extractor
 # ---------------------------------------------------------------------------
 
 
@@ -31,48 +151,29 @@ def extract_docx_pages(path: Path) -> list[tuple[int, str]]:
     """Extract text from a DOCX file, returning (page_index, text) pairs."""
     pages: list[tuple[int, str]] = []
     with zipfile.ZipFile(path) as docx:
-        # Only read document.xml + headers/footers
         names = set(docx.namelist())
-        document_names = [
-            name
-            for name in names
-            if name == "word/document.xml"
+        docs = [
+            n
+            for n in names
+            if n == "word/document.xml"
             or (
-                name.startswith("word/")
-                and name.endswith(".xml")
-                and ("header" in name or "footer" in name)
+                n.startswith("word/")
+                and n.endswith(".xml")
+                and ("header" in n or "footer" in n)
             )
         ]
-        document_names.sort(key=lambda name: 0 if name == "word/document.xml" else 1)
+        docs.sort(key=lambda n: 0 if n == "word/document.xml" else 1)
 
-        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-
-        for index, name in enumerate(document_names, start=1):
-            xml_bytes = docx.read(name)
-            if LXML_AVAILABLE:
-                # Streaming parse: only visit <w:t> text nodes
-                parts = []
-                for _, elem in LET.iterparse(xml_bytes, tag="{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t", events=("end",)):
-                    if elem.text:
-                        parts.append(elem.text)
-                    elem.clear()  # free memory
-                text = clean_text(" ".join(parts))
-            else:
-                # Fallback: stdlib ElementTree (slower)
-                root = LET.fromstring(xml_bytes)
-                parts = [
-                    elem.text for elem in root.iter()
-                    if elem.tag.endswith("}t") and elem.text
-                ]
-                text = clean_text(" ".join(parts))
-
+        for index, name in enumerate(docs, start=1):
+            parts = _iter_xml_text(docx.read(name))
+            text = clean_text(" ".join(parts))
             if text:
                 pages.append((index, text))
     return pages
 
 
 # ---------------------------------------------------------------------------
-# EPUB extractor (optimized with lxml.html + streaming)
+# EPUB extractor
 # ---------------------------------------------------------------------------
 
 
@@ -82,100 +183,43 @@ def extract_epub_pages(path: Path) -> list[tuple[int, str]]:
     with zipfile.ZipFile(path) as book:
         names = set(book.namelist())
 
-        # Locate OPF rootfile
+        # Locate OPF rootfile from container.xml
         rootfile: str | None = None
         if "META-INF/container.xml" in names:
-            container_bytes = book.read("META-INF/container.xml")
-            if LXML_AVAILABLE:
-                tree = LET.fromstring(container_bytes)
-                rootfile_elem = tree.find(".//{*}rootfile")
-                if rootfile_elem is not None:
-                    rootfile = rootfile_elem.get("full-path")
-            else:
-                import xml.etree.ElementTree as ET
-                tree = ET.fromstring(container_bytes)
-                for elem in tree.iter():
-                    if elem.tag.endswith("rootfile"):
-                        rootfile = elem.attrib.get("full-path")
-                        break
+            root = _xml_parse(book.read("META-INF/container.xml"))
+            for child in root.iter():
+                if child.tag.endswith("rootfile"):
+                    rootfile = child.get("full-path")
+                    break
 
         if not rootfile:
             candidates = [n for n in book.namelist() if n.lower().endswith(".opf")]
             rootfile = candidates[0] if candidates else None
 
-        ordered_docs: list[str] = []
+        # Read OPF and resolve spine-ordered HTML docs
+        ordered: list[str] = []
         if rootfile and rootfile in names:
             base = str(Path(rootfile).parent).replace("\\", "/")
             if base == ".":
                 base = ""
-            opf_bytes = book.read(rootfile)
-            if LXML_AVAILABLE:
-                pkg = LET.fromstring(opf_bytes)
-                # Manifest: id -> href (HTML only)
-                manifest = {
-                    item.get("id"): (base + "/" + item.get("href")).lstrip("/") if base else item.get("href")
-                    for item in pkg.xpath("//*[local-name()='item']")
-                    if item.get("id") and item.get("href")
-                    and ("html" in (item.get("media-type", "") or "")
-                         or item.get("href", "").lower().endswith((".html", ".xhtml", ".htm")))
-                }
-                # Spine order
-                spine_ids = [
-                    itemref.get("idref")
-                    for itemref in pkg.xpath("//*[local-name()='itemref']")
-                    if itemref.get("idref")
-                ]
-                ordered_docs = [manifest[sid] for sid in spine_ids if sid in manifest]
-            else:
-                # Fallback stdlib
-                import xml.etree.ElementTree as ET
-                pkg = ET.fromstring(opf_bytes)
-                manifest = {}
-                spine = []
-                for elem in pkg.iter():
-                    tag = elem.tag.split("}", 1)[-1]
-                    if tag == "item":
-                        item_id = elem.attrib.get("id")
-                        href = elem.attrib.get("href")
-                        media_type = elem.attrib.get("media-type", "")
-                        if item_id and href and (
-                            "html" in media_type
-                            or href.lower().endswith((".html", ".xhtml", ".htm"))
-                        ):
-                            manifest[item_id] = (base + "/" + href).lstrip("/") if base else href
-                    elif tag == "itemref":
-                        itemref = elem.attrib.get("idref")
-                        if itemref:
-                            spine.append(itemref)
-                ordered_docs = [manifest[sid] for sid in spine if sid in manifest]
+            opf_root = _xml_parse(book.read(rootfile))
+            manifest = _parse_opf_manifest(opf_root, base)
+            spine = _parse_opf_spine(opf_root)
+            ordered = [manifest[s] for s in spine if s in manifest]
 
-        if not ordered_docs:
-            ordered_docs = [
-                n for n in book.namelist()
+        if not ordered:
+            ordered = [
+                n
+                for n in book.namelist()
                 if n.lower().endswith((".html", ".xhtml", ".htm"))
             ]
 
         seen: set[str] = set()
-        for index, name in enumerate(ordered_docs, start=1):
+        for index, name in enumerate(ordered, start=1):
             if name in seen or name not in names:
                 continue
             seen.add(name)
-            raw_bytes = book.read(name)
-            # lxml.html handles encoding + extracts text efficiently
-            if LXML_AVAILABLE:
-                try:
-                    doc = html_fromstring(raw_bytes)
-                    text = doc.text_content()
-                except Exception:
-                    text = raw_bytes.decode("utf-8", errors="ignore")
-                    import re
-                    text = re.sub(r"(?s)<[^>]+>", " ", text)
-            else:
-                raw = raw_bytes.decode("utf-8", errors="ignore")
-                import re
-                text = re.sub(r"(?s)<[^>]+>", " ", raw)
-
-            text = clean_text(text)
+            text = _html_text(book.read(name))
             if text:
                 pages.append((index, text))
     return pages

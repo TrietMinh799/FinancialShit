@@ -1,4 +1,4 @@
-"""store.py — SQLite document store, FTS search, and multipart form parsing."""
+"""store.py — SQLite document store and FTS search."""
 
 from __future__ import annotations
 
@@ -6,80 +6,24 @@ import contextlib
 import hashlib
 import re
 import sqlite3
-import uuid
+import threading
 from datetime import datetime
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-from core.config import DB_PATH, UPLOAD_DIR
+from core.config import DB_PATH, RECENT_DOCS_LIMIT, REPORT_CHUNK_CHARS, REPORT_CHUNK_OVERLAP
 from core.extractors import extract_pages
 from core.text_utils import chunk_pages, query_terms, sanitize_injection, snippet_for
 from core.vector_store import VectorStore
 
 # ---------------------------------------------------------------------------
-# Multipart parsing helpers
+# Filename / hashing helpers
 # ---------------------------------------------------------------------------
-
-
-def parse_content_disposition(value: str) -> dict[str, str]:
-    """Parse a Content-Disposition header value into a key→value dict."""
-    result: dict[str, str] = {}
-    for part in value.split(";"):
-        if "=" in part:
-            key, raw = part.strip().split("=", 1)
-            result[key.lower()] = raw.strip().strip('"')
-    return result
 
 
 def safe_filename(name: str) -> str:
     """Sanitise *name* to a filesystem-safe string."""
     stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("._")
     return stem or "upload.bin"
-
-
-def parse_multipart(
-    handler: BaseHTTPRequestHandler,
-) -> tuple[dict[str, str], dict[str, Path]]:
-    """Parse a multipart/form-data request body into (fields, files).
-
-    Files are written to UPLOAD_DIR and returned as Path objects.
-    """
-    content_type = handler.headers.get("Content-Type", "")
-    match = re.search(r"boundary=(.+)", content_type)
-    if not match:
-        raise ValueError("Missing multipart boundary.")
-    boundary = match.group(1).strip().strip('"').encode("utf-8")
-    length = int(handler.headers.get("Content-Length", "0"))
-    body = handler.rfile.read(length)
-
-    fields: dict[str, str] = {}
-    files: dict[str, Path] = {}
-
-    for part in body.split(b"--" + boundary):
-        part = part.strip(b"\r\n")
-        if not part or part == b"--" or b"\r\n\r\n" not in part:
-            continue
-        raw_headers, data = part.split(b"\r\n\r\n", 1)
-        if data.endswith(b"\r\n"):
-            data = data[:-2]
-        headers: dict[str, str] = {}
-        for line in raw_headers.decode("utf-8", errors="ignore").split("\r\n"):
-            if ":" in line:
-                key, value = line.split(":", 1)
-                headers[key.lower()] = value.strip()
-        disposition = parse_content_disposition(headers.get("content-disposition", ""))
-        name = disposition.get("name")
-        filename = disposition.get("filename")
-        if not name:
-            continue
-        if filename:
-            target = UPLOAD_DIR / f"{uuid.uuid4().hex}_{safe_filename(filename)}"
-            target.write_bytes(data)
-            files[name] = target
-        else:
-            fields[name] = data.decode("utf-8", errors="ignore")
-
-    return fields, files
 
 
 # ---------------------------------------------------------------------------
@@ -119,9 +63,16 @@ class Store:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    _local = threading.local()
+
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self.path)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            self._local.conn = conn
         return conn
 
     def _init_db(self) -> None:
@@ -154,6 +105,9 @@ class Store:
                     "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_fts "
                     "USING fts5(text, content='chunks', content_rowid='id')"
                 )
+
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_source_type ON documents(source_type)")
 
     def _has_fts(self, conn: sqlite3.Connection) -> bool:
         return (
@@ -195,7 +149,7 @@ class Store:
             raise ValueError("No readable text was found in this file.")
         # Reports are dense; smaller chunks improve retrieval precision.
         if source_type == "annual_report":
-            chunks = chunk_pages(pages, chunk_chars=800, overlap=120)
+            chunks = chunk_pages(pages, chunk_chars=REPORT_CHUNK_CHARS, overlap=REPORT_CHUNK_OVERLAP)
         else:
             chunks = chunk_pages(pages)
         if not chunks:
@@ -243,22 +197,30 @@ class Store:
             doc_id = cursor.lastrowid
             fts = self._has_fts(conn)
 
+            chunk_rows: list[tuple] = []
+            sanitised_texts: list[str] = []
             for index, chunk in enumerate(chunks):
                 chunk_text = sanitize_injection(chunk["text"])
-                c = conn.execute(
-                    "INSERT INTO chunks "
-                    "(document_id, chunk_index, page_start, page_end, text) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (doc_id, index, chunk["page_start"], chunk["page_end"], chunk_text),
+                chunk_rows.append((doc_id, index, chunk["page_start"], chunk["page_end"], chunk_text))
+                sanitised_texts.append(chunk_text)
+
+            conn.executemany(
+                "INSERT INTO chunks (document_id, chunk_index, page_start, page_end, text) VALUES (?, ?, ?, ?, ?)",
+                chunk_rows,
+            )
+
+            if fts:
+                chunk_ids = conn.execute(
+                    "SELECT id FROM chunks WHERE document_id = ? ORDER BY chunk_index",
+                    (doc_id,),
+                ).fetchall()
+                conn.executemany(
+                    "INSERT INTO chunk_fts(rowid, text) VALUES (?, ?)",
+                    [(r["id"], t) for r, t in zip(chunk_ids, sanitised_texts)],
                 )
-                if fts:
-                    conn.execute(
-                        "INSERT INTO chunk_fts(rowid, text) VALUES (?, ?)",
-                        (c.lastrowid, chunk_text),
-                    )
 
             # Index into ChromaDB for vector search (with sanitised text)
-            sanitised_chunks = [{**ch, "text": sanitize_injection(ch["text"])} for ch in chunks]
+            sanitised_chunks = [{**ch, "text": sanitised_texts[i]} for i, ch in enumerate(chunks)]
             source_type_str = source_type or "book"
             with contextlib.suppress(Exception):
                 self.vector_store().index_chunks(
@@ -296,7 +258,8 @@ class Store:
                 " LEFT JOIN chunks c ON c.document_id = d.id"
                 " GROUP BY d.id"
                 " ORDER BY d.created_at DESC"
-                " LIMIT 12"
+                " LIMIT ?",
+                (RECENT_DOCS_LIMIT,),
             ).fetchall()
         return {
             "documents": totals["documents"],
@@ -429,6 +392,63 @@ class Store:
 
         return [item for _, item in fused[:limit]]
 
+    def expand_context(
+        self,
+        items: list[dict],
+        neighbor_window: int = 1,
+    ) -> list[dict]:
+        """Attach neighboring chunks (±neighbor_window) to each retrieved item.
+
+        For each item, fetches the preceding and following chunks from the same
+        document and merges their text. This gives the LLM a wider window around
+        the matched passage without increasing the initial retrieval limit.
+
+        Returns a new list of items with an added ``context_text`` field
+        containing the expanded text.
+        """
+        if not items:
+            return items
+
+        doc_chunk_map: dict[int, list[int]] = {}
+        for item in items:
+            doc_id = item.get("document_id")
+            chunk_id = item.get("chunk_id")
+            if doc_id and chunk_id:
+                doc_chunk_map.setdefault(doc_id, set()).add(chunk_id)
+
+        with self._connect() as conn:
+            for doc_id, chunk_ids in doc_chunk_map.items():
+                for cid in chunk_ids:
+                    for offset in range(-neighbor_window, neighbor_window + 1):
+                        target = cid + offset
+                        if target < 0:
+                            continue
+                        row = conn.execute(
+                            "SELECT text FROM chunks WHERE document_id = ? AND chunk_index = ?",
+                            (doc_id, target),
+                        ).fetchone()
+                        if row and row["text"]:
+                            items.append(
+                                {
+                                    "document_id": doc_id,
+                                    "chunk_id": target,
+                                    "context_text": row["text"],
+                                    "expanded": True,
+                                }
+                            )
+
+        # Deduplicate by (document_id, chunk_id)
+        seen = set()
+        deduped = []
+        for item in items:
+            key = (item.get("document_id"), item.get("chunk_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+
+        return deduped
+
     # ------------------------------------------------------------------
     # Re-index (e.g. after switching the embedding model)
     # ------------------------------------------------------------------
@@ -439,40 +459,41 @@ class Store:
         Reads chunk text back from SQLite (where it is kept verbatim) and
         re-runs the current embedding model. Use this after changing
         ``EMBED_MODEL`` so the vector index matches the new model.
+
+        Documents are processed one at a time so peak memory stays bounded to
+        a single document's chunks rather than the entire library.
         """
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT c.document_id, c.chunk_index, c.page_start, c.page_end, c.text,"
-                "       d.title, d.source_type"
-                " FROM chunks c"
-                " JOIN documents d ON d.id = c.document_id"
-                " ORDER BY c.document_id, c.chunk_index"
-            ).fetchall()
+            doc_ids = [row["id"] for row in conn.execute(
+                "SELECT id FROM documents ORDER BY id"
+            ).fetchall()]
 
-        by_doc: dict[int, list[dict]] = {}
-        meta: dict[int, dict] = {}
-        for row in rows:
-            doc_id = row["document_id"]
-            if doc_id not in by_doc:
-                by_doc[doc_id] = []
-                meta[doc_id] = {
-                    "title": row["title"],
-                    "source_type": row["source_type"],
-                }
-            by_doc[doc_id].append(
+        total = 0
+        for doc_id in doc_ids:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT c.page_start, c.page_end, c.text, d.title, d.source_type"
+                    " FROM chunks c"
+                    " JOIN documents d ON d.id = c.document_id"
+                    " WHERE c.document_id = ?"
+                    " ORDER BY c.chunk_index",
+                    (doc_id,),
+                ).fetchall()
+            if not rows:
+                continue
+
+            chunks = [
                 {
                     "text": row["text"],
                     "page_start": row["page_start"],
                     "page_end": row["page_end"],
                 }
-            )
-
-        total = 0
-        for doc_id, chunks in by_doc.items():
+                for row in rows
+            ]
             self.vector_store().index_chunks(
                 doc_id,
-                meta[doc_id]["title"],
-                meta[doc_id]["source_type"],
+                rows[0]["title"],
+                rows[0]["source_type"],
                 chunks,
             )
             total += len(chunks)

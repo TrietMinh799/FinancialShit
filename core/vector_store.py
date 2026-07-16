@@ -35,6 +35,11 @@ def _get_model() -> SentenceTransformer:
     return _model
 
 
+def load_embedding_model() -> None:
+    """Preload the embedding model into memory. Call at startup."""
+    _get_model()
+
+
 def _embed(texts: list[str]) -> list[list[float]]:
     return _get_model().encode(texts, normalize_embeddings=True).tolist()
 

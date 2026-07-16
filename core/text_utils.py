@@ -7,6 +7,12 @@ import re
 import unicodedata
 
 from core.config import (
+    CHUNK_CHARS,
+    CHUNK_MIN_LEN,
+    CHUNK_MIN_STEP,
+    CHUNK_OVERLAP,
+    QUERY_TERM_LIMIT,
+    SNIPPET_MAX_CHARS,
     STOPWORDS,
 )
 
@@ -116,7 +122,7 @@ def remove_diacritics(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def query_terms(query: str, limit: int = 14) -> list[str]:
+def query_terms(query: str, limit: int = QUERY_TERM_LIMIT) -> list[str]:
     """Extract meaningful tokens from *query* for keyword search.
 
     Also extracts diacritic-free alternatives so that typing
@@ -141,17 +147,17 @@ def query_terms(query: str, limit: int = 14) -> list[str]:
 
 def chunk_pages(
     pages: list[tuple[int, str]],
-    chunk_chars: int = 1400,
-    overlap: int = 180,
+    chunk_chars: int = CHUNK_CHARS,
+    overlap: int = CHUNK_OVERLAP,
 ) -> list[dict]:
     """Split page texts into overlapping chunks suitable for FTS indexing."""
     chunks: list[dict] = []
-    step = max(400, chunk_chars - overlap)
+    step = max(CHUNK_MIN_STEP, chunk_chars - overlap)
     for page_number, text in pages:
         start = 0
         while start < len(text):
             chunk = clean_text(text[start : start + chunk_chars])
-            if len(chunk) >= 120:
+            if len(chunk) >= CHUNK_MIN_LEN:
                 chunks.append({"page_start": page_number, "page_end": page_number, "text": chunk})
             start += step
     return chunks
@@ -162,7 +168,7 @@ def chunk_pages(
 # ---------------------------------------------------------------------------
 
 
-def snippet_for(text: str, terms: list[str], max_chars: int = 420) -> str:
+def snippet_for(text: str, terms: list[str], max_chars: int = SNIPPET_MAX_CHARS) -> str:
     """Return a short excerpt of *text* that is most likely to contain *terms*."""
     lower = text.lower()
     positions = [lower.find(term) for term in terms if lower.find(term) >= 0]

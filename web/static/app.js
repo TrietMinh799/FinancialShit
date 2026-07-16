@@ -1,17 +1,104 @@
 /* ====================================================
-   app.js — Valuation RAG Chatbot (Flask + multi-LLM)
+   app.js - Valuation RAG Chatbot (Flask + multi-LLM)
    ==================================================== */
 
 const $ = id => document.getElementById(id);
 const safe = v => String(v ?? '').replace(/[&<>"']/g, c =>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
+function renderMarkdown(text) {
+  if (!text) return '';
+
+  // Escape HTML first to prevent XSS
+  text = safe(text);
+
+  // Fenced code blocks — protect from other formatting
+  text = text.replace(/```(\w*)\n?([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
+
+  // Tables — consecutive pipe-delimited lines
+  text = text.replace(/((?:^\|.+\|\n?)+)/gm, (match) => {
+    const lines = match.trim().split('\n').filter(l => l.trim());
+    if (lines.length < 2) return match;
+    const hasSep = /^\|[-:| ]+\|$/.test(lines[1].trim());
+    let tbl = '<table><thead><tr>';
+    lines[0].split('|').filter(c => c.trim()).forEach(c => {
+      tbl += `<th>${inlineMd(c.trim())}</th>`;
+    });
+    tbl += '</tr></thead>';
+    if (hasSep && lines.length > 2 || !hasSep && lines.length > 1) {
+      tbl += '<tbody>';
+      for (let i = hasSep ? 2 : 1; i < lines.length; i++) {
+        const cells = lines[i].split('|').filter(c => c.trim());
+        if (cells.length) {
+          tbl += '<tr>';
+          cells.forEach(c => tbl += `<td>${inlineMd(c.trim())}</td>`);
+          tbl += '</tr>';
+        }
+      }
+      tbl += '</tbody>';
+    }
+    return tbl + '</table>';
+  });
+
+  // Split into blocks by blank lines
+  return text.split(/\n{2,}/).map(block => {
+    block = block.trim();
+    if (!block) return '';
+
+    // Already an HTML block — pass through
+    if (block[0] === '<') return block;
+
+    const lines = block.split('\n');
+
+    // Heading
+    if (/^#{1,6}\s/.test(block)) {
+      const level = block.indexOf(' ');
+      return `<h${level}>${inlineMd(block.slice(level + 1))}</h${level}>`;
+    }
+
+    // Horizontal rule
+    if (/^[-*_]{3,}$/.test(block)) return '<hr>';
+
+    // Unordered list
+    if (lines.every(l => /^[-*+]\s/.test(l))) {
+      return '<ul>' + lines.map(l => {
+        const m = l.match(/^[-*+]\s+(.*)/);
+        return m ? `<li>${inlineMd(m[1])}</li>` : '';
+      }).join('') + '</ul>';
+    }
+
+    // Ordered list
+    if (lines.every(l => /^\d+\.\s/.test(l))) {
+      return '<ol>' + lines.map(l => {
+        const m = l.match(/^\d+\.\s+(.*)/);
+        return m ? `<li>${inlineMd(m[1])}</li>` : '';
+      }).join('') + '</ol>';
+    }
+
+    // Paragraph
+    return '<p>' + lines.map((l, i) =>
+      i > 0 ? `<br>${inlineMd(l)}` : inlineMd(l)
+    ).join('') + '</p>';
+  }).filter(Boolean).join('\n');
+}
+
+function inlineMd(text) {
+  return text
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/__(.+?)__/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/_(.+?)_/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+
 let isSending   = false;
-let typingEl    = null;
 let providers   = [];
 let activeProvider = null;
+let conversation = [];            // {role, content} history for LLM context
 
-// ── Provider & model helpers ───────────────────────
+// -- Provider & model helpers -----------------------
 function baseUrl() {
   if (!activeProvider) return '';
   if (activeProvider.id === 'custom') return ($('settingsCustomBaseUrl')?.value || '').trim();
@@ -26,7 +113,7 @@ function apiModel() {
   return sel || ($('settingsModelCustom')?.value || '').trim() || '';
 }
 
-// ── Persist / restore settings ─────────────────────
+// -- Persist / restore settings ---------------------
 function loadSettings() {
   const pid   = localStorage.getItem('rag_provider_id') || 'openai';
   const key   = localStorage.getItem('rag_api_key') || '';
@@ -66,7 +153,7 @@ async function readJson(res) {
   return d;
 }
 
-// ── API key dot ────────────────────────────────────
+// -- API key dot ------------------------------------
 function setKeyDot(state) {
   ['apiKeyDot', 'settingsApiKeyDot'].forEach(id => {
     const el = $(id);
@@ -74,7 +161,7 @@ function setKeyDot(state) {
   });
 }
 
-// ── Load providers from backend ────────────────────
+// -- Load providers from backend --------------------
 async function loadProviders() {
   try {
     const data = await fetch('/api/providers').then(r => r.json());
@@ -130,7 +217,7 @@ function selectProvider(pid, preferredModel) {
   modelSelects.forEach(sel => {
     sel.innerHTML = p.models.map(m =>
       `<option value="${safe(m)}">${safe(m)}</option>`
-    ).join('') + '<option value="__custom__">Nhập tên khác…</option>';
+    ).join('') + '<option value="__custom__">Nhập tên khác...</option>';
   });
 
   const target = preferredModel || p.models[0] || '';
@@ -146,7 +233,7 @@ function selectProvider(pid, preferredModel) {
   });
 
   keyInputs.forEach(input => {
-    input.placeholder = p.key_placeholder || 'API key…';
+    input.placeholder = p.key_placeholder || 'API key...';
   });
 
   setKeyDot('');
@@ -166,7 +253,7 @@ $('settingsModelSelect').addEventListener('change', () => {
   $('settingsModelCustom').style.display = $('settingsModelSelect').value === '__custom__' ? '' : 'none';
 });
 
-// ── Library ────────────────────────────────────────
+// -- Library ----------------------------------------
 async function loadLibrary() {
   try {
     const data = await fetch('/api/library').then(readJson);
@@ -178,7 +265,7 @@ async function loadLibrary() {
             <span class="lib-dot lib-dot--${d.source_type === 'book' ? 'book' : 'report'}"></span>
             <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${safe(d.title)}</span>
             <span style="flex-shrink:0;font-size:10.5px;color:var(--text-muted)">${d.page_count}tr</span>
-            <button class="lib-del" onclick="deleteBook(${d.id})" title="Xoá tài liệu">✕</button>
+            <button class="lib-del" onclick="deleteBook(${d.id})" title="Xóa tài liệu">?</button>
           </div>`).join('')
       : '<p style="font-size:11.5px;color:var(--text-muted);padding:0 4px">Chưa có tài liệu</p>';
   } catch(e) {
@@ -187,7 +274,7 @@ async function loadLibrary() {
 }
 
 async function deleteBook(id) {
-  if (!confirm('Xoá tài liệu này?')) return;
+  if (!confirm('Xóa tài liệu này?')) return;
   try {
     const res = await fetch(`/api/books/${id}`, { method: 'DELETE' }).then(readJson);
     if (res.error) throw new Error(res.error);
@@ -197,12 +284,12 @@ async function deleteBook(id) {
   }
 }
 
-// ── Welcome screen ─────────────────────────────────
+// -- Welcome screen ---------------------------------
 function setWelcome(visible) {
   $('welcomeScreen').style.display = visible ? 'flex' : 'none';
 }
 
-// ── Message rendering ──────────────────────────────
+// -- Message rendering ------------------------------
 function appendMessage(role, html, sources = []) {
   setWelcome(false);
   const now = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
@@ -279,76 +366,197 @@ function scrollBottom() {
   body.scrollTo({top: body.scrollHeight, behavior: 'smooth'});
 }
 
-// ── Typing indicator ───────────────────────────────
-function showTyping() {
-  if (typingEl) return;
-  typingEl = document.createElement('div');
-  typingEl.className = 'typing-indicator';
-
-  const av = document.createElement('div');
-  av.className = 'message-avatar';
-  av.style.cssText = 'width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:700;flex-shrink:0;margin-top:4px;background:linear-gradient(135deg,#6366f1,#a855f7);color:#fff';
-  av.textContent = 'AI';
-
-  const bub = document.createElement('div');
-  bub.className = 'typing-bubble';
-  for (let i=0;i<3;i++) {
-    const d = document.createElement('span');
-    d.className = 'typing-dot';
-    bub.appendChild(d);
-  }
-
-  typingEl.appendChild(av);
-  typingEl.appendChild(bub);
-  $('typingAnchor').appendChild(typingEl);
-  scrollBottom();
-}
-
-function hideTyping() {
-  if (typingEl) { typingEl.remove(); typingEl = null; }
-}
-
-// ── Send question ──────────────────────────────────
+  // -- Send question ----------------------------------
 async function sendQuestion(question) {
   if (!question || isSending) return;
+  conversation.push({role: "user", content: question});
+  // Keep last 20 messages to avoid overflowing the LLM context window.
+  if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
   appendUserMessage(question);
-  isSending = true; updateSendBtn();
-  showTyping();
-  saveSettings();
 
+  // Create a streaming bot message bubble
+  const botMsg = document.createElement('div');
+  botMsg.className = 'message message--bot';
+  const av = document.createElement('div');
+  av.className = 'message-avatar';
+  av.textContent = 'AI';
+  const cont = document.createElement('div');
+  cont.className = 'message-content';
+  const bub = document.createElement('div');
+  bub.className = 'message-bubble';
+  bub.innerHTML = '<div class="typing-dots"><div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div></div>';
+  botMsg.appendChild(av);
+  const bwrap = document.createElement('div');
+  bwrap.className = 'message-bubble-wrapper';
+  bwrap.appendChild(bub);
+  cont.appendChild(bwrap);
+  const meta = document.createElement('div');
+  meta.className = 'message-meta';
+  meta.textContent = '[]'; // placeholder, update later
+  cont.appendChild(meta);
+  botMsg.appendChild(cont);
+  
+  $('messagesList').appendChild(botMsg);
+  scrollBottom();
+  
+  let full_text = '';
+  let statusText = 'Đang truy xuất · ' + (activeProvider?.label || '') + '...';
+  setStatus(statusText);
+  
+  // Try to use streaming endpoint if supported
+  let useStreaming = false;
   try {
-    setStatus(`Đang truy xuất · ${activeProvider?.label || ''}…`);
-    const result = await fetch('/api/ask', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        question,
-        api_key:  apiKey(),
-        model:    apiModel(),
-        base_url: baseUrl(),
-      })
-    }).then(readJson);
+    const testRes = new Response();
+    useStreaming = typeof testRes.body?.getReader === 'function';
+  } catch (e) {
+    useStreaming = false;
+  }
+  
+  try {
+    if (useStreaming) {
+      const res = await fetch('/api/ask/stream', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          question,
+          messages: conversation.slice(0, -1),
+          api_key:  apiKey(),
+          model:    apiModel(),
+          base_url: baseUrl(),
+        })
+      });
+      
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-    hideTyping();
-    const sources = (result.citations || []).map(c => c.title || 'Nguồn');
-    appendBotText(result.answer, sources);
-    setStatus(result.mode === 'llm' ? 'Câu trả lời LLM ✓' : 'Câu trả lời bằng chứng ✓');
+      if (!res.body) {
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        if (data.answer) {
+          full_text = data.answer;
+          bub.innerHTML = renderMarkdown(full_text);
+          meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
+          if (data.citations?.length) {
+            const src = document.createElement('div');
+            src.className = 'message-sources';
+            data.citations.forEach(c => {
+              const t = document.createElement('span');
+              t.className = 'source-tag';
+              t.textContent = c.title || 'Nguồn';
+              src.appendChild(t);
+            });
+            cont.appendChild(src);
+          }
+          setStatus('Done');
+        }
+        conversation.push({role: "assistant", content: full_text});
+        if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
+      } else {
+        let reader;
+        try {
+          reader = res.body.getReader();
+        } catch {
+          const data = await res.json();
+          if (data.error) throw new Error(data.error);
+          if (data.answer) full_text = data.answer;
+          bub.innerHTML = renderMarkdown(full_text);
+          meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
+          conversation.push({role: "assistant", content: full_text});
+          if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
+          return;
+        }
+        const decoder = new TextDecoder();
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          const text = decoder.decode(value, {stream: true});
+          for (const line of text.split('\n')) {
+            if (line.startsWith('data: ')) {
+              const data = JSON.parse(line.slice(6));
+              if (data.status) {
+                setStatus(data.status);
+              } else if (data.token) {
+                full_text += data.token;
+                bub.innerHTML = renderMarkdown(full_text);
+                meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
+              } else if (data.done) {
+                const sources = (data.citations || []).map(c => c.title || 'Nguồn');
+                meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
+                if (sources.length) {
+                  const src = document.createElement('div');
+                  src.className = 'message-sources';
+                  sources.forEach(s => {
+                    const t = document.createElement('span');
+                    t.className = 'source-tag';
+                    t.textContent = s;
+                    src.appendChild(t);
+                  });
+                  cont.appendChild(src);
+                }
+                if (activeProvider) {
+                  setStatus(data.mode === 'llm' ? 'Câu trả lời LLM xong' : 'Câu trả lời bằng chứng xong');
+                }
+                conversation.push({role: "assistant", content: full_text});
+                if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
+                break;
+              } else if (data.error) {
+                throw new Error(data.error);
+              }
+            }
+          }
+        }
+      }
+    } else {
+      // Fallback to non-streaming endpoint for older browsers
+      const result = await fetch('/api/ask', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          question,
+          messages: conversation.slice(0, -1),
+          api_key:  apiKey(),
+          model:    apiModel(),
+          base_url: baseUrl(),
+        })
+      }).then(readJson);
+
+      full_text = result.answer;
+      bub.innerHTML = renderMarkdown(full_text);
+      const sources = (result.citations || []).map(c => c.title || 'Nguồn');
+      if (sources.length) {
+        const src = document.createElement('div');
+        src.className = 'message-sources';
+        sources.forEach(s => {
+          const t = document.createElement('span');
+          t.className = 'source-tag';
+          t.textContent = s;
+          src.appendChild(t);
+        });
+        cont.appendChild(src);
+      }
+      meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
+      setStatus(result.mode === 'llm' ? 'Câu trả lời LLM xong' : 'Câu trả lời bằng chứng xong');
+      conversation.push({role: "assistant", content: full_text});
+      if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
+    }
   } catch(err) {
-    hideTyping();
-    appendBotText('Lỗi: ' + err.message);
+    botMsg.classList.add('error');
+    bub.textContent = 'Lỗi: ' + err.message;
+    meta.textContent = '';
+    conversation.push({role: "assistant", content: "Lỗi: " + err.message});
+    if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
     setStatus('Lỗi');
   }
 
   isSending = false; updateSendBtn();
 }
 
-// ── Upload book ────────────────────────────────────
+// -- Upload book ------------------------------------
 async function submitBook() {
   const file = $('bookFile').files[0];
   if (!file) { alert('Vui lòng chọn tệp sách.'); return; }
   closeModal('bookModal');
-  appendBotHtml(`<span style="color:var(--text-muted)">⏳ Đang thêm sách <strong>${safe(file.name)}</strong> vào RAG…</span>`);
-  setStatus('Đang thêm sách…');
+  appendBotHtml(`<span style="color:var(--text-muted)">Đang thêm sách <strong>${safe(file.name)}</strong> vào RAG...</span>`);
+  setStatus('Đang thêm sách...');
 
   const fd = new FormData();
   fd.append('book_file', file);
@@ -357,10 +565,10 @@ async function submitBook() {
   try {
     const result = await fetch('/api/upload-book', {method:'POST', body:fd}).then(readJson);
     const msg = result.inserted
-      ? `✅ Đã thêm sách "${safe(result.title)}" — ${result.page_count} trang, ${result.chunk_count} đoạn.`
-      : `ℹ️ Sách "${safe(result.title)}" đã có trong thư viện (${result.chunk_count} đoạn).`;
+      ? `[OK] Đã thêm sách "${safe(result.title)}" - ${result.page_count} trang, ${result.chunk_count} đoạn.`
+      : `[i] Sách "${safe(result.title)}" đã có trong thư viện (${result.chunk_count} đoạn).`;
     appendBotText(msg);
-    setStatus('Đã thêm sách ✓');
+    setStatus('Đã thêm sách xong');
     await loadLibrary();
   } catch(err) {
     appendBotText('Lỗi khi thêm sách: ' + err.message);
@@ -368,7 +576,7 @@ async function submitBook() {
   }
 }
 
-// ── Analyze report ─────────────────────────────────
+// -- Analyze report ---------------------------------
 async function submitReport() {
   const file = $('reportFile').files[0];
   if (!file) { alert('Vui lòng chọn file PDF báo cáo.'); return; }
@@ -376,8 +584,8 @@ async function submitReport() {
   const ticker  = $('reportTicker').value.trim()  || 'N/A';
   closeModal('reportModal');
 
-  appendBotHtml(`<span style="color:var(--text-muted)">⏳ Đang phân tích báo cáo của <strong>${safe(company)} (${safe(ticker)})</strong> qua <strong>${safe(activeProvider?.label||'LLM')}</strong>…</span>`);
-  setStatus('Đang phân tích…');
+  appendBotHtml(`<span style="color:var(--text-muted)">Đang phân tích báo cáo của <strong>${safe(company)} (${safe(ticker)})</strong> qua <strong>${safe(activeProvider?.label||'LLM')}</strong>...</span>`);
+  setStatus('Đang phân tích...');
   saveSettings();
 
   const fd = new FormData();
@@ -391,7 +599,7 @@ async function submitReport() {
   try {
     const r = await fetch('/api/analyze-report', {method:'POST', body:fd}).then(readJson);
     renderAnalysis(r, company, ticker);
-    setStatus('Phân tích hoàn tất ✓');
+    setStatus('Phân tích hoàn thành');
     await loadLibrary();
   } catch(err) {
     appendBotText('Lỗi khi phân tích: ' + err.message);
@@ -434,7 +642,7 @@ function renderAnalysis(r, company, ticker) {
     }
   }
 
-  const swotColor = {Điểm_Mạnh:'#34d399',Điểm_Yếu:'#f87171',Cơ_Hội:'#818cf8',Thách_Thức:'#fbbf24'};
+  const swotColor = {'Điểm_Mạnh':'#34d399','Điểm_Yếu':'#f87171','Cơ_Hội':'#818cf8','Thách_Thức':'#fbbf24'};
   const rswot = reason.reasoned_swot || {};
   const swotData = [
     ['Điểm_Mạnh','Điểm Mạnh', rswot.strengths || sit.strengths],
@@ -445,7 +653,7 @@ function renderAnalysis(r, company, ticker) {
   const swotHtml = swotData.map(([key,label,items]) => `
     <div class="result-section">
       <div class="result-section-title" style="color:${swotColor[key]}">${label}</div>
-      <ul>${(items||[]).map(i=>`<li>${safe(i)}</li>`).join('')||'<li>—</li>'}</ul>
+      <ul>${(items||[]).map(i=>`<li>${safe(i)}</li>`).join('')||'<li>-</li>'}</ul>
     </div>`).join('');
 
   let keyHtml = '';
@@ -476,11 +684,11 @@ function renderAnalysis(r, company, ticker) {
 
   appendBotHtml(`
     <div class="result-card">
-      <h4>📊 Phân Tích: ${safe(company)} (${safe(ticker)})</h4>
+      <h4>• Phân Tích: ${safe(company)} (${safe(ticker)})</h4>
       <div class="score-row">${scoreHtml}</div>
       <div class="result-section">
         <div class="result-section-title">Lợi Thế Cạnh Tranh</div>
-        <p><strong>${safe(adv.rating||'')}</strong> — ${safe(adv.assessment||'')}</p>
+        <p><strong>${safe(adv.rating||'')}</strong> - ${safe(adv.assessment||'')}</p>
       </div>
       ${commentaryHtml}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:10px">${swotHtml}</div>
@@ -491,28 +699,28 @@ function renderAnalysis(r, company, ticker) {
       </div>
       ${repHtml}
     </div>`);
-  appendBotText(`Phân tích ${company} hoàn tất. Bạn có thể hỏi tôi bất kỳ câu hỏi nào về báo cáo này.`);
+  appendBotText(`Phân tích ${company} hoàn thành. Bạn có thể hỏi bất kỳ câu hỏi nào về báo cáo này.`);
 }
 
-// ── Test key ───────────────────────────────────────
+// -- Test key ---------------------------------------
 async function testKey() {
   saveSettings();
   if (!apiKey()) { alert('Vui lòng dán API key trước.'); return; }
-  setStatus('Đang kiểm tra…'); setKeyDot('');
+  setStatus('Đang kiểm tra...'); setKeyDot('');
   try {
     const r = await fetch('/api/test-key', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({api_key: apiKey(), model: apiModel(), base_url: baseUrl()})
     }).then(r => r.json());
     setKeyDot(r.ok ? 'ok' : 'err');
-    setStatus(r.ok ? `${activeProvider?.label||'API'} ✓` : 'Kết nối thất bại');
+    setStatus(r.ok ? `${activeProvider?.label||'API'} xong` : 'Kết nối thất bại');
     alert(r.message);
   } catch(e) {
     setKeyDot('err'); setStatus('Lỗi'); alert(e.message);
   }
 }
 
-// ── Input helpers ──────────────────────────────────
+// -- Input helpers ----------------------------------
 function autoResize() {
   const t = $('userInput');
   t.style.height = 'auto';
@@ -522,11 +730,11 @@ function updateSendBtn() {
   $('sendButton').disabled = !$('userInput').value.trim() || isSending;
 }
 
-// ── Modal helpers ──────────────────────────────────
+// -- Modal helpers ----------------------------------
 function openModal(id)  { $(id).classList.add('open'); }
 function closeModal(id) { $(id).classList.remove('open'); }
 
-// ── Sidebar ────────────────────────────────────────
+// -- Sidebar ----------------------------------------
 function openSidebar() {
   $('sidebar').classList.add('open');
   $('sidebarOverlay').classList.add('open');
@@ -540,10 +748,11 @@ function closeSidebar() {
 
 function clearChat() {
   $('messagesList').innerHTML = '';
+  conversation = [];
   setWelcome(true);
 }
 
-// ── Event wiring ───────────────────────────────────
+// -- Event wiring -----------------------------------
 $('sendButton').addEventListener('click', () => {
   const q = $('userInput').value.trim();
   if (!q) return;
@@ -577,7 +786,7 @@ $('openReportModal').addEventListener('click', () => { closeSidebar(); openModal
 $('headerAnalyzeReport').addEventListener('click', () => openModal('reportModal'));
 $('clearChatBtn').addEventListener('click', () => { closeSidebar(); clearChat(); });
 $('settingsTestBtn').addEventListener('click', async () => { syncSettingsFromModal(); saveSettings(); await testKey(); });
-$('settingsSaveBtn').addEventListener('click', () => { syncSettingsFromModal(); saveSettings(); closeModal('settingsModal'); setStatus('Cài đặt LLM đã lưu ✓'); });
+$('settingsSaveBtn').addEventListener('click', () => { syncSettingsFromModal(); saveSettings(); closeModal('settingsModal'); setStatus('Cài đặt LLM đã lưu xong'); });
 $('refreshLibBtn').addEventListener('click', () => loadLibrary().catch(console.error));
 $('settingsApiKey').addEventListener('change', () => setKeyDot(''));
 
@@ -591,7 +800,7 @@ $('bookModal').addEventListener('click', e => { if (e.target === $('bookModal'))
 $('reportModal').addEventListener('click', e => { if (e.target === $('reportModal')) closeModal('reportModal'); });
 $('settingsModal').addEventListener('click', e => { if (e.target === $('settingsModal')) closeModal('settingsModal'); });
 
-// ── Init ───────────────────────────────────────────
+// -- Init -------------------------------------------
 updateSendBtn();
 setWelcome(true);
 loadProviders();

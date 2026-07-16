@@ -15,6 +15,11 @@ def _get_model() -> CrossEncoder:
     return _model
 
 
+def load_reranker_model() -> None:
+    """Preload the reranker model into memory. Call at startup."""
+    _get_model()
+
+
 def rerank(query: str, candidates: list[dict], top_k: int = 5) -> list[dict]:
     """Score and re-rank *candidates* by relevance to *query* using a cross-encoder.
 

@@ -1,9 +1,11 @@
-"""config.py — Global configuration, paths, constants, and domain vocabularies."""
+# -*- coding: utf-8 -*-
+"""config.py - Global configuration, paths, constants, and domain vocabularies."""
 
 from __future__ import annotations
 
 import os
 import tempfile
+from collections import OrderedDict
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -19,14 +21,38 @@ DB_PATH = ROOT / "rag.sqlite3"
 CHROMA_DIR = ROOT / "chroma"
 
 # In-memory run cache (populated by analysis.analyze_report)
-RUNS: dict = {}
+RUNS: OrderedDict = OrderedDict()
+MAX_RUNS: int = 50
+
+# ---------------------------------------------------------------------------
+# Chunking & retrieval tunables
+# ---------------------------------------------------------------------------
+# Default chunk sizing for reference books.
+CHUNK_CHARS: int = 1400
+CHUNK_OVERLAP: int = 180
+CHUNK_MIN_STEP: int = 400          # minimum slide between chunk windows
+CHUNK_MIN_LEN: int = 120           # discard chunks shorter than this
+# Denser annual-report chunks improve retrieval precision.
+REPORT_CHUNK_CHARS: int = 800
+REPORT_CHUNK_OVERLAP: int = 120
+# Snippet extraction.
+SNIPPET_MAX_CHARS: int = 420
+# Query tokenisation cap.
+QUERY_TERM_LIMIT: int = 14
+# Number of recent documents surfaced by Store.stats().
+RECENT_DOCS_LIMIT: int = 12
+# Cross-encoder rerank cutoff.
+RERANK_TOP_K: int = 5
+# LLM HTTP timeouts (seconds).
+LLM_TIMEOUT: int = 120
+LLM_STREAM_TIMEOUT: int = 300  # longer for streaming: free models can take minutes to first token
+LLM_REPORT_TIMEOUT: int = 300  # longer timeout for report analysis (larger prompts)
+LLM_DECOMPOSE_TIMEOUT: int = 25  # reduced: free/slow models fall back to raw question faster
 
 # ---------------------------------------------------------------------------
 # Model names
 # ---------------------------------------------------------------------------
 OPENAI_MODEL: str = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
-MODEL: str = "google/gemma-4-31b-it:free"  # OpenRouter default
-OPENROUTER_MODELS_URL: str = "https://openrouter.ai/api/v1/models"
 
 # Base URL for any OpenAI-compatible Chat Completions provider.
 # Examples:

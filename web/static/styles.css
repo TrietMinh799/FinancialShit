@@ -639,6 +639,98 @@ textarea {
   box-shadow: 0 2px 12px rgba(99,102,241,0.35);
 }
 
+/* ── Markdown rendered content ── */
+.message-bubble p {
+  margin: 0.5em 0;
+}
+.message-bubble p:first-child { margin-top: 0; }
+.message-bubble p:last-child { margin-bottom: 0; }
+
+.message-bubble table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+  font-size: 12.5px;
+}
+.message-bubble th,
+.message-bubble td {
+  border: 1px solid var(--border-bright);
+  padding: 6px 10px;
+  text-align: left;
+}
+.message-bubble th {
+  background: var(--bg-active);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+.message-bubble tr:nth-child(even) td {
+  background: rgba(255,255,255,0.02);
+}
+
+.message-bubble code {
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 12.5px;
+  background: var(--bg-active);
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #f472b6;
+}
+.message-bubble pre {
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0.5em 0;
+}
+.message-bubble pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.message-bubble ul,
+.message-bubble ol {
+  margin: 0.4em 0;
+  padding-left: 1.5em;
+}
+.message-bubble li {
+  margin-bottom: 0.2em;
+}
+.message-bubble hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 0.8em 0;
+}
+.message-bubble h1, .message-bubble h2, .message-bubble h3,
+.message-bubble h4, .message-bubble h5, .message-bubble h6 {
+  color: var(--text-primary);
+  margin: 0.6em 0 0.3em;
+  font-weight: 600;
+}
+.message-bubble h1 { font-size: 18px; }
+.message-bubble h2 { font-size: 17px; }
+.message-bubble h3 { font-size: 16px; }
+.message-bubble h4 { font-size: 15px; }
+.message-bubble h5 { font-size: 14px; }
+.message-bubble h6 { font-size: 13px; }
+.message-bubble a {
+  color: #a5b4fc;
+  text-decoration: underline;
+}
+.message-bubble a:hover {
+  opacity: 0.8;
+}
+.message-bubble blockquote {
+  border-left: 3px solid var(--border-bright);
+  margin: 0.5em 0;
+  padding: 4px 12px;
+  color: var(--text-secondary);
+}
+
 .message-meta {
   font-size: 11px;
   color: var(--text-muted);
@@ -717,25 +809,12 @@ textarea {
   color: #a5b4fc;
 }
 
-/* ── Typing Indicator ── */
-.typing-indicator {
-  display: flex;
-  gap: 12px;
-  animation: fadeInUp 0.3s ease-out;
-  padding: 0 20px;
-  max-width: 820px;
-  margin: 0 auto;
-  width: 100%;
-}
-.typing-bubble {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--msg-radius);
-  border-top-left-radius: 4px;
-  padding: 14px 18px;
+/* ── Typing Indicator (inline in bubble) ── */
+.typing-dots {
   display: flex;
   align-items: center;
   gap: 5px;
+  padding: 2px 0;
 }
 .typing-dot {
   width: 7px;
