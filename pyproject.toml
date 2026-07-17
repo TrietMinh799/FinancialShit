@@ -11,6 +11,7 @@ dependencies = [
     "flask>=3",
     "python-dotenv>=1",
     "pypdf>=5",
+    "pdfplumber>=0.11",
     "sentence-transformers>=3",
     "chromadb>=1",
 ]

@@ -103,7 +103,7 @@ def _parse_opf_manifest(
         for item in items:
             item_id: str | None = item.get("id")
             href: str | None = item.get("href")
-            media_type: str | None = item.get("media-type") or ""
+            media_type: str = item.get("media-type") or ""
             if not item_id or not href:
                 continue
             if "html" in media_type or href.lower().endswith((".html", ".xhtml", ".htm")):
@@ -115,7 +115,7 @@ def _parse_opf_manifest(
                 continue
             item_id = child.get("id")
             href = child.get("href")
-            media_type = child.get("media-type", "")
+            media_type: str = child.get("media-type") or ""
             if not item_id or not href:
                 continue
             if "html" in media_type or href.lower().endswith((".html", ".xhtml", ".htm")):
@@ -235,15 +235,30 @@ def extract_pages(path: Path) -> list[tuple[int, str]]:
     suffix = path.suffix.lower()
 
     if suffix == ".pdf":
-        reader = PdfReader(str(path))
+        import pdfplumber
+
         pages: list[tuple[int, str]] = []
-        for index, page in enumerate(reader.pages, start=1):
+        with pdfplumber.open(str(path)) as pdf:
+            for index, page in enumerate(pdf.pages, start=1):
+                try:
+                    text = clean_text(page.extract_text() or "")
+                except Exception:
+                    text = ""
+                if text:
+                    pages.append((index, text))
+        if not pages:
+            # Fallback: try pypdf for tricky PDFs pdfplumber can't handle
             try:
-                text = clean_text(page.extract_text() or "")
+                reader = PdfReader(str(path))
+                for index, page in enumerate(reader.pages, start=1):
+                    try:
+                        text = clean_text(page.extract_text() or "")
+                    except Exception:
+                        text = ""
+                    if text:
+                        pages.append((index, text))
             except Exception:
-                text = ""
-            if text:
-                pages.append((index, text))
+                pass
         if not pages:
             raise ValueError(
                 "No readable text was found in this PDF. "

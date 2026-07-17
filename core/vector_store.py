@@ -8,7 +8,8 @@ from typing import Any
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-from core.config import CHROMA_DIR
+from core.cache import LRUCache
+from core.config import CHROMA_DIR, SNIPPET_MAX_CHARS
 
 # ---------------------------------------------------------------------------
 # Embedding model
@@ -35,13 +36,38 @@ def _get_model() -> SentenceTransformer:
     return _model
 
 
+_embed_cache = LRUCache(maxsize=2000, default_ttl=None)
+_search_cache = LRUCache(maxsize=500, default_ttl=120)
+
+
 def load_embedding_model() -> None:
     """Preload the embedding model into memory. Call at startup."""
     _get_model()
 
 
 def _embed(texts: list[str]) -> list[list[float]]:
-    return _get_model().encode(texts, normalize_embeddings=True).tolist()
+    cached: list[list[float]] = []
+    uncached: list[int] = []
+    uncached_texts: list[str] = []
+
+    for i, t in enumerate(texts):
+        key = f"{_MODEL_NAME}||{t}"
+        val = _embed_cache.get(key)
+        if val is not None:
+            cached.append((i, val))
+        else:
+            uncached.append(i)
+            uncached_texts.append(t)
+
+    if uncached_texts:
+        new_vecs = _get_model().encode(uncached_texts, normalize_embeddings=True).tolist()
+        for idx, vec in zip(uncached, new_vecs, strict=False):
+            key = f"{_MODEL_NAME}||{texts[idx]}"
+            _embed_cache.put(key, vec)
+            cached.append((idx, vec))
+
+    cached.sort(key=lambda x: x[0])
+    return [v for _, v in cached]
 
 
 # ---------------------------------------------------------------------------
@@ -119,22 +145,27 @@ class VectorStore:
             embeddings=embeddings,
             metadatas=metadatas,
         )
+        self.invalidate_search_cache()
 
     def search(
         self,
         query: str,
         source_types: list[str] | None = None,
-        limit: int = 20,
+        limit: int = 30,
     ) -> list[dict]:
         """Semantic search across one or more collections.
 
-        When *source_types* includes both ``book`` and ``annual_report`` the
-        method queries both collections independently and then merges the
-        results sorted by cosine distance (ascending).
+        Results are cached for 120s so repeated/similar queries skip
+        ChromaDB lookups and embedding computation.
         """
+        cache_key = f"{_MODEL_NAME}||{query}||{sorted(source_types or ['book'])}||{limit}"
+        cached = _search_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         query_emb = _embed([query])
         collection_names = self._resolve(source_types)
-        per_coll_limit = limit  # fetch *limit* from each collection
+        per_coll_limit = limit
 
         all_results: list[dict] = []
 
@@ -168,15 +199,48 @@ class VectorStore:
                         "source_type": str(meta.get("source_type", "")),
                         "page_start": int(meta["page_start"]) if page_start_str.isdigit() else None,
                         "page_end": int(meta["page_end"]) if page_end_str.isdigit() else None,
-                        "snippet": (text[:420] + "...") if len(text) > 420 else text,
+                        "snippet": (text[:SNIPPET_MAX_CHARS] + "...") if len(text) > SNIPPET_MAX_CHARS else text,
                         "score": float(distances[i]),
                     }
                 )
 
         all_results.sort(key=lambda x: x["score"])
-        return all_results[:limit]
+        result = all_results[:limit]
+        _search_cache.put(cache_key, result, ttl=120)
+        return result
+
+    def invalidate_search_cache(self) -> None:
+        """Clear vector search cache (call after indexing new chunks)."""
+        _search_cache.invalidate()
+
+    def clear_all(self) -> None:
+        """Delete all collections and re-create them empty.
+
+        Used by ``reindex_all`` to guarantee a clean slate so orphaned
+        vectors (from docs deleted only in SQLite) are purged.
+        """
+        if self._client is None:
+            return
+        for coll in self._client.list_collections():
+            try:
+                self._client.delete_collection(coll.name)
+            except Exception:
+                pass
+        self._collections.clear()
+        _search_cache.invalidate()
 
     def delete_document(self, document_id: int) -> None:
-        """Remove every chunk that belongs to *document_id* from all collections."""
-        for coll in self._collections.values():
-            coll.delete(where={"document_id": str(document_id)})
+        """Remove every chunk that belongs to *document_id* from all known collections.
+
+        Uses the persistent ChromaDB client to list all collections so chunks
+        are cleaned up even if the collection hasn't been accessed yet in this
+        session (fixes lazy-init bug where ``_collections`` could be empty).
+        """
+        if self._client is None:
+            CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+            self._client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+        for coll in self._client.list_collections():
+            try:
+                coll.delete(where={"document_id": str(document_id)})
+            except Exception:
+                pass

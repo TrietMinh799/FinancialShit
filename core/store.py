@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import logging
 import re
 import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
 
-from core.config import DB_PATH, RECENT_DOCS_LIMIT, REPORT_CHUNK_CHARS, REPORT_CHUNK_OVERLAP
+logger = logging.getLogger(__name__)
+
+from core.config import DB_PATH, RECENT_DOCS_LIMIT, REPORT_CHUNK_CHARS, REPORT_CHUNK_OVERLAP, UPLOAD_DIR
 from core.extractors import extract_pages
 from core.text_utils import chunk_pages, query_terms, sanitize_injection, snippet_for
 from core.vector_store import VectorStore
@@ -166,6 +169,30 @@ class Store:
             ).fetchone()
 
             if existing:
+                # If source_type differs, update it and re-index chunks into the correct collection
+                if existing["source_type"] != source_type:
+                    conn.execute(
+                        "UPDATE documents SET source_type = ? WHERE id = ?",
+                        (source_type, existing["id"]),
+                    )
+                    # Re-index chunks into the new collection
+                    rows = conn.execute(
+                        "SELECT c.page_start, c.page_end, c.text, d.title "
+                        "FROM chunks c JOIN documents d ON d.id = c.document_id "
+                        "WHERE c.document_id = ? ORDER BY c.chunk_index",
+                        (existing["id"],),
+                    ).fetchall()
+                    if rows:
+                        self.vector_store().delete_document(existing["id"])
+                        re_chunks = [
+                            {"text": r["text"], "page_start": r["page_start"], "page_end": r["page_end"]}
+                            for r in rows
+                        ]
+                        self.vector_store().index_chunks(
+                            existing["id"], rows[0]["title"], source_type, re_chunks
+                        )
+                        self.vector_store().invalidate_search_cache()
+
                 chunk_count = conn.execute(
                     "SELECT COUNT(*) FROM chunks WHERE document_id = ?",
                     (existing["id"],),
@@ -173,7 +200,7 @@ class Store:
                 return {
                     "document_id": existing["id"],
                     "title": existing["title"],
-                    "source_type": existing["source_type"],
+                    "source_type": source_type,
                     "char_count": existing["char_count"],
                     "page_count": existing["page_count"],
                     "chunk_count": chunk_count,
@@ -195,6 +222,8 @@ class Store:
                 ),
             )
             doc_id = cursor.lastrowid
+            if doc_id is None:
+                raise RuntimeError("Failed to retrieve last inserted document ID")
             fts = self._has_fts(conn)
 
             chunk_rows: list[tuple] = []
@@ -222,13 +251,15 @@ class Store:
             # Index into ChromaDB for vector search (with sanitised text)
             sanitised_chunks = [{**ch, "text": sanitised_texts[i]} for i, ch in enumerate(chunks)]
             source_type_str = source_type or "book"
-            with contextlib.suppress(Exception):
+            try:
                 self.vector_store().index_chunks(
                     doc_id,
                     title or path.stem,
                     source_type_str,
                     sanitised_chunks,
                 )
+            except Exception as exc:
+                logger.error("ChromaDB indexing failed for doc %s (%s): %s", doc_id, title, exc)
 
             return {
                 "document_id": doc_id,
@@ -269,6 +300,35 @@ class Store:
             "recent_documents": [dict(row) for row in recent],
         }
 
+    def get_document_chunks(
+        self,
+        document_id: int,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        """Return paginated chunks for a document, ordered by chunk_index."""
+        with self._connect() as conn:
+            doc = conn.execute(
+                "SELECT id, title FROM documents WHERE id = ?", (document_id,)
+            ).fetchone()
+            if not doc:
+                raise ValueError(f"Document {document_id} not found.")
+            rows = conn.execute(
+                "SELECT id, chunk_index, page_start, page_end, substr(text, 1, 500) AS text_preview,"
+                "       length(text) AS char_count"
+                " FROM chunks WHERE document_id = ? ORDER BY chunk_index LIMIT ? OFFSET ?",
+                (document_id, limit, offset),
+            ).fetchall()
+            total = conn.execute(
+                "SELECT COUNT(*) FROM chunks WHERE document_id = ?", (document_id,)
+            ).fetchone()[0]
+        return {
+            "document_id": document_id,
+            "title": doc["title"],
+            "total_chunks": total,
+            "chunks": [dict(r) for r in rows],
+        }
+
     def delete_document(self, document_id: int) -> dict:
         """Remove a document and its chunks from SQLite, FTS, ChromaDB, and disk."""
         with self._connect() as conn:
@@ -288,11 +348,52 @@ class Store:
 
         return {"ok": True, "document_id": document_id}
 
+    def reclassify_document(self, document_id: int, new_source_type: str) -> dict:
+        """Change a document's source_type and re-index its chunks into the correct collection."""
+        with self._connect() as conn:
+            doc = conn.execute(
+                "SELECT id, title, source_type FROM documents WHERE id = ?", (document_id,)
+            ).fetchone()
+            if not doc:
+                raise ValueError(f"Document {document_id} not found.")
+            old_type = doc["source_type"]
+            if old_type == new_source_type:
+                return {"ok": True, "document_id": document_id, "source_type": new_source_type, "changed": False}
+
+            # Update source_type in SQLite
+            conn.execute(
+                "UPDATE documents SET source_type = ? WHERE id = ?",
+                (new_source_type, document_id),
+            )
+
+            # Read all chunks for this document
+            rows = conn.execute(
+                "SELECT c.page_start, c.page_end, c.text"
+                " FROM chunks c WHERE c.document_id = ?"
+                " ORDER BY c.chunk_index",
+                (document_id,),
+            ).fetchall()
+
+        # Delete from old collection, index into new collection
+        self.vector_store().delete_document(document_id)
+        chunks = [
+            {"text": row["text"], "page_start": row["page_start"], "page_end": row["page_end"]}
+            for row in rows
+        ]
+        if chunks:
+            chunk_chars = REPORT_CHUNK_CHARS if new_source_type == "annual_report" else None
+            self.vector_store().index_chunks(
+                document_id, doc["title"], new_source_type, chunks,
+            )
+        self.vector_store().invalidate_search_cache()
+
+        return {"ok": True, "document_id": document_id, "source_type": new_source_type, "changed": True}
+
     def search(
         self,
         query: str,
         source_types: list[str] | None = None,
-        limit: int = 8,
+        limit: int = 15,
     ) -> list[dict]:
         """Full-text search with BM25 (FTS5) or LIKE fallback."""
         terms = query_terms(query)
@@ -349,7 +450,7 @@ class Store:
         self,
         query: str,
         source_types: list[str] | None = None,
-        limit: int = 10,
+        limit: int = 20,
         rrf_k: int = 60,
     ) -> list[dict]:
         """Combine vector (ChromaDB) and BM25 (FTS5) results via RRF.
@@ -395,31 +496,49 @@ class Store:
     def expand_context(
         self,
         items: list[dict],
-        neighbor_window: int = 1,
+        neighbor_window: int = 2,
     ) -> list[dict]:
         """Attach neighboring chunks (±neighbor_window) to each retrieved item.
 
-        For each item, fetches the preceding and following chunks from the same
-        document and merges their text. This gives the LLM a wider window around
-        the matched passage without increasing the initial retrieval limit.
+        For each item, fetches the full text of its own chunk and the
+        preceding/following chunks from the same document.  This gives the LLM
+        a wider window around the matched passage without increasing the
+        initial retrieval limit.
 
-        Returns a new list of items with an added ``context_text`` field
-        containing the expanded text.
+        Returns a new list of items.  Every item gets a ``context_text`` field
+        with the full chunk text (original items are enriched in-place, neighbor
+        items are appended).  Items with only ``context_text`` (neighbors) are
+        flagged with ``expanded: True``.
         """
         if not items:
             return items
 
-        doc_chunk_map: dict[int, list[int]] = {}
-        for item in items:
-            doc_id = item.get("document_id")
-            chunk_id = item.get("chunk_id")
-            if doc_id and chunk_id:
-                doc_chunk_map.setdefault(doc_id, set()).add(chunk_id)
-
         with self._connect() as conn:
+            # 1. Enrich original items with their own full text
+            for item in items:
+                doc_id = item.get("document_id")
+                chunk_id = item.get("chunk_id")
+                if doc_id is not None and chunk_id is not None:
+                    row = conn.execute(
+                        "SELECT text FROM chunks WHERE document_id = ? AND chunk_index = ?",
+                        (doc_id, chunk_id),
+                    ).fetchone()
+                    if row and row["text"]:
+                        item["context_text"] = row["text"]
+
+            # 2. Neighbor chunks
+            doc_chunk_map: dict[int, set[int]] = {}
+            for item in items:
+                doc_id = item.get("document_id")
+                chunk_id = item.get("chunk_id")
+                if doc_id is not None and chunk_id is not None:
+                    doc_chunk_map.setdefault(doc_id, set()).add(chunk_id)
+
             for doc_id, chunk_ids in doc_chunk_map.items():
                 for cid in chunk_ids:
                     for offset in range(-neighbor_window, neighbor_window + 1):
+                        if offset == 0:
+                            continue  # already handled above
                         target = cid + offset
                         if target < 0:
                             continue
@@ -437,9 +556,9 @@ class Store:
                                 }
                             )
 
-        # Deduplicate by (document_id, chunk_id)
-        seen = set()
-        deduped = []
+        # 3. Deduplicate by (document_id, chunk_id)
+        seen: set = set()
+        deduped: list[dict] = []
         for item in items:
             key = (item.get("document_id"), item.get("chunk_id"))
             if key in seen:
@@ -462,7 +581,11 @@ class Store:
 
         Documents are processed one at a time so peak memory stays bounded to
         a single document's chunks rather than the entire library.
+
+        Note: ChromaDB collections are cleared first so orphaned vectors
+        (from documents deleted only from SQLite) are purged.
         """
+        self.vector_store().clear_all()
         with self._connect() as conn:
             doc_ids = [row["id"] for row in conn.execute(
                 "SELECT id FROM documents ORDER BY id"

@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -135,6 +136,24 @@ def library() -> Response:
         return resp
 
 
+@app.route("/api/books/<int:doc_id>/chunks")
+def book_chunks(doc_id: int) -> Response:
+    """Return paginated chunks for a document."""
+    try:
+        limit = request.args.get("limit", 50, type=int)
+        offset = request.args.get("offset", 0, type=int)
+        return jsonify(_store.get_document_chunks(doc_id, limit, offset))
+    except ValueError as exc:
+        resp = jsonify({"error": str(exc)})
+        resp.status_code = 404
+        return resp
+    except Exception:
+        logger.exception("book-chunks error")
+        resp = jsonify({"error": "Failed to load chunks."})
+        resp.status_code = 500
+        return resp
+
+
 @app.route("/api/books/<int:doc_id>", methods=["DELETE"])
 def delete_book(doc_id: int) -> Response:
     try:
@@ -147,6 +166,29 @@ def delete_book(doc_id: int) -> Response:
     except Exception:
         logger.exception("delete-book error")
         resp = jsonify({"error": "Failed to delete document."})
+        resp.status_code = 500
+        return resp
+
+
+@app.route("/api/books/<int:doc_id>/reclassify", methods=["POST"])
+def reclassify_book(doc_id: int) -> Response:
+    """Change a document's source_type and re-index its chunks."""
+    data = request.get_json(silent=True) or {}
+    new_type = data.get("source_type") or ""
+    if new_type not in ("book", "annual_report"):
+        resp = jsonify({"error": "source_type must be 'book' or 'annual_report'"})
+        resp.status_code = 400
+        return resp
+    try:
+        result = _store.reclassify_document(doc_id, new_type)
+        return jsonify(result)
+    except ValueError as exc:
+        resp = jsonify({"error": str(exc)})
+        resp.status_code = 404
+        return resp
+    except Exception:
+        logger.exception("reclassify-book error")
+        resp = jsonify({"error": "Failed to reclassify document."})
         resp.status_code = 500
         return resp
 
@@ -211,7 +253,7 @@ def test_key() -> Response:
 # ---------------------------------------------------------------------------
 
 from flask import stream_with_context
-from core.llm import call_openai_llm_stream
+from core.llm import call_openai_llm, call_openai_llm_stream
 
 
 @app.route("/api/ask/stream", methods=["POST"])
@@ -228,75 +270,146 @@ def ask_stream() -> Response:
     base_url = payload.get("base_url") or LLM_BASE_URL
     history = payload.get("messages") or []
 
-    # NOTE: For streaming, we reuse the same retrieval logic as /api/ask
-    # (decompose_query -> hybrid_search -> rerank). Retrieval is synchronous
-    # because it's fast. Only the LLM call is streamed.
-
-    try:
+    def generate():
         t0 = time.time()
 
-        # Decompose the question into focused English sub-queries for better retrieval.
-        # Falls back to the raw question if the decomposition call fails or times out.
-        # Translation to English is important because the document library is in English.
-        sub_queries = decompose_query(question, api_key, model, base_url, history)
+        try:
+            # Phase 1 — Decompose
+            yield _sse({"status": "Analyzing question..."})
+            sub_queries = decompose_query(question, api_key, model, base_url, history)
+            # Always include the original question for coverage — decomposed
+            # sub-queries can drift from the user's actual intent.
+            if question not in sub_queries:
+                sub_queries.append(question)
 
-        all_citations: list[dict] = []
-        for q in sub_queries:
-            all_citations.extend(_store.hybrid_search(q, ["book", "annual_report"], 20))
-        t1 = time.time()
-        print(f"[timing] hybrid_search: {t1-t0:.1f}s | sub_queries: {sub_queries}", flush=True)
-        citations = unique(all_citations, 30)
-        if citations:
-            citations = rerank(question, citations, top_k=RERANK_TOP_K)
-        t2 = time.time()
-        print(f"[timing] rerank: {t2-t1:.1f}s | citations: {len(citations)}", flush=True)
+            # Phase 2 — Parallel hybrid search across sub-queries
+            yield _sse({"status": f"Searching library ({len(sub_queries)} queries)..."})
+            all_citations: list[dict] = []
+            with ThreadPoolExecutor(max_workers=min(len(sub_queries), 4)) as pool:
+                fut_map = {
+                    pool.submit(_store.hybrid_search, q, ["book", "annual_report"], 30): q
+                    for q in sub_queries
+                }
+                for fut in as_completed(fut_map):
+                    try:
+                        all_citations.extend(fut.result())
+                    except Exception:
+                        pass
+            t1 = time.time()
+            print(f"[timing] hybrid_search: {t1-t0:.1f}s | sub_queries: {sub_queries}", flush=True)
 
-        # Query expansion: extract key terms from top passages and retrieve
-        # supplementary evidence to fill gaps the initial search may have missed.
-        if citations and len(citations) >= 2:
-            extra_terms: set[str] = set()
-            for c in citations[:min(3, len(citations))]:
-                snippet = c.get("snippet", "")
-                terms = query_terms(snippet)
-                extra_terms.update(t for t in terms[:5] if t.lower() not in question.lower())
-            if extra_terms:
-                expansion = f"{question} {' '.join(list(extra_terms)[:8])}"
-                extra = _store.hybrid_search(expansion, ["book", "annual_report"], 10)
-                citations = unique(citations + extra, 30)
-                if citations:
-                    citations = rerank(question, citations, top_k=RERANK_TOP_K)
-        t3 = time.time()
-        print(f"[timing] expansion: {t3-t2:.1f}s | final citations: {len(citations)}", flush=True)
+            citations = unique(all_citations, 50)
 
-        # No citations or no API key – return a plain JSON fallback (no stream)
-        if not citations or not api_key:
-            answer = fallback_answer(question, citations)
-            mode = "rag"
-            mode_label = "Evidence-based answer"
-            resp = jsonify({"question": question, "answer": answer, "mode": mode, "mode_label": mode_label, "citations": citations})
-            resp.status_code = 200
-            return resp
+            # Phase 2b — Broader fallback if no results found
+            if not citations:
+                yield _sse({"status": "Broadening search..."})
+                broad_terms = query_terms(question)
+                if broad_terms:
+                    broad_query = " ".join(broad_terms[:15])
+                    citations = _store.hybrid_search(
+                        broad_query, ["book", "annual_report"], 20
+                    )
+                    if citations:
+                        citations = unique(citations, 20)
 
-        # Prepare an SSE (Server-Sent Events) stream
-        def generate():
-            yield f"data: {json.dumps({'status': 'Generating answer with LLM...'})}\n\n"
+            if citations:
+                yield _sse({"status": "Ranking results..."})
+                citations = rerank(question, citations, top_k=RERANK_TOP_K)
+            t2 = time.time()
+            print(f"[timing] rerank: {t2-t1:.1f}s | citations: {len(citations)}", flush=True)
+
+            # Phase 3 — Context expansion & multi-strategy query expansion
+            if citations:
+                yield _sse({"status": "Expanding context..."})
+                expanded = _store.expand_context(citations)
+                citations = expanded[:RERANK_TOP_K]
+
+                # Strategy A — Keyword-based query expansion from top passages
+                yield _sse({"status": "Expanding search (keywords)..."})
+                extra_terms: set[str] = set()
+                for c in citations[:min(5, len(citations))]:
+                    text = c.get("context_text") or c.get("snippet", "")
+                    terms = query_terms(text)
+                    extra_terms.update(t for t in terms[:8] if t.lower() not in question.lower())
+                if extra_terms:
+                    expansion = f"{question} {' '.join(list(extra_terms)[:12])}"
+                    extra = _store.hybrid_search(expansion, ["book", "annual_report"], 15)
+                    if extra:
+                        citations = unique(citations + extra, 40)
+                        if citations:
+                            citations = rerank(question, citations, top_k=RERANK_TOP_K)
+                            expanded = _store.expand_context(citations)
+                            citations = expanded[:RERANK_TOP_K]
+
+                # Strategy B — LLM-based sub-query expansion (when API key available)
+                if api_key and citations:
+                    yield _sse({"status": "Expanding search (LLM queries)..."})
+                    try:
+                        top_texts = []
+                        for c in citations[:3]:
+                            txt = c.get("context_text") or c.get("snippet", "")
+                            if txt:
+                                top_texts.append(txt[:300])
+                        if top_texts:
+                            expansion_prompt = (
+                                "Original question: " + question + "\n\n"
+                                "Top evidence snippets:\n" +
+                                "\n---\n".join(top_texts) + "\n\n"
+                                "Generate 2-3 alternative search queries that would find "
+                                "additional relevant evidence the current snippets might miss. "
+                                "Focus on different phrasings, synonyms, or related aspects. "
+                                "Return ONLY the queries, one per line, no numbering."
+                            )
+                            alt_queries = call_openai_llm(
+                                expansion_prompt, [], api_key, model, base_url, history=[]
+                            )
+                            if alt_queries and alt_queries.strip():
+                                alt_lines = [ln.strip() for ln in alt_queries.splitlines() if ln.strip() and len(ln.strip()) > 5]
+                                for aq in alt_lines[:3]:
+                                    extra = _store.hybrid_search(aq, ["book", "annual_report"], 15)
+                                    if extra:
+                                        citations = unique(citations + extra, 40)
+                                if len(citations) > RERANK_TOP_K:
+                                    citations = rerank(question, citations, top_k=RERANK_TOP_K)
+                                    expanded = _store.expand_context(citations)
+                                    citations = expanded[:RERANK_TOP_K]
+                    except Exception:
+                        pass
+
+            t3 = time.time()
+            print(f"[timing] expansion: {t3-t2:.1f}s | final citations: {len(citations)}", flush=True)
+
+            # Phase 4 — Answer
+            if not citations or not api_key:
+                answer = fallback_answer(question, citations)
+                yield _sse({"token": answer})
+                yield _sse({"done": True, "citations": citations, "mode": "rag",
+                            "mode_label": "Evidence-based answer", "full_text": answer})
+                return
+
+            yield _sse({"status": "Generating answer with LLM..."})
             for chunk in call_openai_llm_stream(question, citations, api_key, model, base_url, history=history):
                 if "token" in chunk:
-                    yield f"data: {json.dumps({'token': chunk['token']})}\n\n"
+                    yield _sse({"token": chunk["token"]})
                 elif "done" in chunk:
-                    yield f"data: {json.dumps({'done': True, 'citations': chunk.get('citations', []), 'mode': chunk.get('mode', 'llm'), 'full_text': chunk.get('full_text', '')})}\n\n"
-                    break
+                    yield _sse({"done": True, "citations": chunk.get("citations", []),
+                                "mode": chunk.get("mode", "llm"),
+                                "full_text": chunk.get("full_text", "")})
+                    return
                 elif "error" in chunk:
-                    yield f"data: {json.dumps({'error': chunk['error']})}\n\n"
-                    break
+                    yield _sse({"error": chunk["error"]})
+                    return
 
-        return Response(stream_with_context(generate()), content_type="text/event-stream")
+        except Exception as exc:
+            logger.exception("ask-stream error")
+            yield _sse({"error": str(exc)})
 
-    except Exception as exc:
-        logger.exception("ask-stream error")
-        resp = jsonify({"error": str(exc)})
-        resp.status_code = 500
-        return resp
+    return Response(stream_with_context(generate()), content_type="text/event-stream")
+
+
+def _sse(data: dict) -> str:
+    """Format a dict as a Server-Sent Event data line."""
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
 @app.route("/api/ask", methods=["POST"])
@@ -339,8 +452,18 @@ def upload_book() -> Response:
     file.save(str(target))
 
     title = sanitize_field(request.form.get("book_title") or Path(file.filename).stem)
+
+    # Determine source type: explicit override > filename heuristic
+    source_type = request.form.get("source_type") or ""
+    if source_type not in ("book", "annual_report"):
+        fname_lower = file.filename.lower()
+        if any(kw in fname_lower for kw in ("annual report", "báo cáo annual", "báo cáo thường niên", "ar_", "_ar")):
+            source_type = "annual_report"
+        else:
+            source_type = "book"
+
     try:
-        result = _store.add_document(target, title, "book")
+        result = _store.add_document(target, title, source_type)
         return jsonify(result)
     except Exception:
         logger.exception("upload-book error")

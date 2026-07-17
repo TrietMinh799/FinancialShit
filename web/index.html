@@ -685,14 +685,21 @@
   <!-- ── MODAL: Upload Book ── -->
   <div class="modal-backdrop" id="bookModal">
     <div class="modal">
-      <p class="modal-title">Thêm Sách Vào Thư Viện RAG</p>
+      <p class="modal-title">Thêm Tài Liệu Vào Thư Viện RAG</p>
       <p class="modal-subtitle">Hỗ trợ PDF, EPUB, DOCX, TXT, MD</p>
       <div>
-        <label class="field-label">Tiêu Đề Sách</label>
-        <input id="bookTitle" class="field-input" placeholder="Sách giáo khoa định giá, sách chiến lược…" />
+        <label class="field-label">Tiêu Đề</label>
+        <input id="bookTitle" class="field-input" placeholder="Sách giáo khoa định giá, báo cáo thường niên…" />
       </div>
       <div>
-        <label class="field-label">Tệp Sách</label>
+        <label class="field-label">Loại Tài Liệu</label>
+        <select id="bookSourceType" class="field-input" style="cursor:pointer">
+          <option value="book">Sách / Tài liệu tham khảo</option>
+          <option value="annual_report">Báo cáo thường niên (Annual Report)</option>
+        </select>
+      </div>
+      <div>
+        <label class="field-label">Tệp</label>
         <input id="bookFile" class="field-input" type="file" accept=".pdf,.epub,.docx,.txt,.md" style="cursor:pointer;color:var(--text-secondary)" />
       </div>
       <div class="modal-actions">

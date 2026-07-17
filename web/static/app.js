@@ -260,13 +260,20 @@ async function loadLibrary() {
     $('libCount').textContent = data.documents;
     const docs = data.recent_documents || [];
     $('sidebarDocs').innerHTML = docs.length
-      ? docs.map(d => `
+      ? docs.map(d => {
+          const typeLabel = d.source_type === 'annual_report' ? 'Báo cáo' : 'Sách';
+          const toggleLabel = d.source_type === 'annual_report' ? 'Sách' : 'Báo cáo';
+          const toggleIcon = d.source_type === 'annual_report' ? '📖' : '📊';
+          return `
           <div class="lib-item" data-id="${d.id}">
             <span class="lib-dot lib-dot--${d.source_type === 'book' ? 'book' : 'report'}"></span>
-            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${safe(d.title)}</span>
-            <span style="flex-shrink:0;font-size:10.5px;color:var(--text-muted)">${d.page_count}tr</span>
-            <button class="lib-del" onclick="deleteBook(${d.id})" title="Xóa tài liệu">?</button>
-          </div>`).join('')
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${safe(d.title)} (${typeLabel})">${safe(d.title)}</span>
+            <span style="flex-shrink:0;font-size:10.5px;color:var(--text-muted)">${d.page_count}tr · ${d.chunk_count} đoạn</span>
+            <button class="lib-del" onclick="viewChunks(${d.id})" title="Xem các đoạn">⊞</button>
+            <button class="lib-del" onclick="reclassifyBook(${d.id}, '${d.source_type === 'annual_report' ? 'book' : 'annual_report'}')" title="Đổi thành ${toggleLabel}">${toggleIcon}</button>
+            <button class="lib-del" onclick="deleteBook(${d.id})" title="Xóa tài liệu">×</button>
+          </div>`;
+        }).join('')
       : '<p style="font-size:11.5px;color:var(--text-muted);padding:0 4px">Chưa có tài liệu</p>';
   } catch(e) {
     $('sidebarDocs').innerHTML = `<p style="font-size:11.5px;color:#f87171;padding:0 4px">${safe(e.message)}</p>`;
@@ -279,6 +286,55 @@ async function deleteBook(id) {
     const res = await fetch(`/api/books/${id}`, { method: 'DELETE' }).then(readJson);
     if (res.error) throw new Error(res.error);
     loadLibrary();
+  } catch(e) {
+    alert('Lỗi: ' + e.message);
+  }
+}
+
+async function reclassifyBook(id, newType) {
+  const label = newType === 'annual_report' ? 'báo cáo thường niên' : 'sách';
+  if (!confirm(`Đổi tài liệu thành "${label}" và re-index?`)) return;
+  try {
+    const res = await fetch(`/api/books/${id}/reclassify`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source_type: newType})
+    }).then(readJson);
+    if (res.error) throw new Error(res.error);
+    if (res.changed) {
+      appendBotText(`[OK] Đã đổi thành "${label}" và re-index xong.`);
+    } else {
+      appendBotText(`[i] Tài liệu đã là "${label}" rồi.`);
+    }
+    loadLibrary();
+  } catch(e) {
+    alert('Lỗi: ' + e.message);
+  }
+}
+
+async function viewChunks(id) {
+  try {
+    const data = await fetch(`/api/books/${id}/chunks?limit=100`).then(readJson);
+    if (data.error) throw new Error(data.error);
+    const html = data.chunks.map(c =>
+      `<div style="margin-bottom:10px;padding:8px 10px;background:var(--bg-elevated);border-radius:8px;font-size:12px;line-height:1.5">
+        <div style="display:flex;gap:8px;margin-bottom:4px;color:var(--text-muted);font-size:10.5px">
+          <span>Đoạn ${c.chunk_index + 1}</span>
+          <span>Trang ${c.page_start}${c.page_end !== c.page_start ? '-' + c.page_end : ''}</span>
+          <span>${c.char_count} ký tự</span>
+        </div>
+        <div style="color:var(--text-secondary)">${safe(c.text_preview)}</div>
+      </div>`
+    ).join('');
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-backdrop open';
+    overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+    overlay.innerHTML = `<div class="modal" style="width:min(680px,94vw);max-height:80vh;overflow-y:auto">
+      <p class="modal-title">${safe(data.title)} — ${data.total_chunks} đoạn</p>
+      ${html || '<p style="color:var(--text-muted)">Không có đoạn nào.</p>'}
+      <div class="modal-actions"><button class="btn-cancel" onclick="this.closest('.modal-backdrop').remove()">Đóng</button></div>
+    </div>`;
+    document.body.appendChild(overlay);
   } catch(e) {
     alert('Lỗi: ' + e.message);
   }
@@ -434,7 +490,7 @@ async function sendQuestion(question) {
         if (data.answer) {
           full_text = data.answer;
           bub.innerHTML = renderMarkdown(full_text);
-          meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
+          meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '') + ` · ${full_text.length} ký tự`;
           if (data.citations?.length) {
             const src = document.createElement('div');
             src.className = 'message-sources';
@@ -459,7 +515,7 @@ async function sendQuestion(question) {
           if (data.error) throw new Error(data.error);
           if (data.answer) full_text = data.answer;
           bub.innerHTML = renderMarkdown(full_text);
-          meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
+          meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '') + ` · ${full_text.length} ký tự`;
           conversation.push({role: "assistant", content: full_text});
           if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
           return;
@@ -476,11 +532,19 @@ async function sendQuestion(question) {
                 setStatus(data.status);
               } else if (data.token) {
                 full_text += data.token;
-                bub.innerHTML = renderMarkdown(full_text);
+                if (!bub._rt) {
+                  bub._rt = requestAnimationFrame(() => {
+                    bub.innerHTML = renderMarkdown(full_text);
+                    bub._rt = null;
+                  });
+                }
                 meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
               } else if (data.done) {
+                if (bub._rt) { cancelAnimationFrame(bub._rt); bub._rt = null; }
+                bub.innerHTML = renderMarkdown(full_text);
                 const sources = (data.citations || []).map(c => c.title || 'Nguồn');
-                meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
+                const cnt = full_text.length;
+                meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '') + ` · ${cnt} ký tự`;
                 if (sources.length) {
                   const src = document.createElement('div');
                   src.className = 'message-sources';
@@ -533,7 +597,7 @@ async function sendQuestion(question) {
         });
         cont.appendChild(src);
       }
-      meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
+      meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '') + ` · ${full_text.length} ký tự`;
       setStatus(result.mode === 'llm' ? 'Câu trả lời LLM xong' : 'Câu trả lời bằng chứng xong');
       conversation.push({role: "assistant", content: full_text});
       if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
@@ -555,23 +619,26 @@ async function submitBook() {
   const file = $('bookFile').files[0];
   if (!file) { alert('Vui lòng chọn tệp sách.'); return; }
   closeModal('bookModal');
-  appendBotHtml(`<span style="color:var(--text-muted)">Đang thêm sách <strong>${safe(file.name)}</strong> vào RAG...</span>`);
-  setStatus('Đang thêm sách...');
+  const sourceType = $('bookSourceType').value || 'book';
+  const label = sourceType === 'annual_report' ? 'báo cáo thường niên' : 'sách';
+  appendBotHtml(`<span style="color:var(--text-muted)">Đang thêm ${label} <strong>${safe(file.name)}</strong> vào RAG...</span>`);
+  setStatus(`Đang thêm ${label}...`);
 
   const fd = new FormData();
   fd.append('book_file', file);
   fd.append('book_title', $('bookTitle').value.trim() || file.name.replace(/\.[^.]+$/,''));
+  fd.append('source_type', sourceType);
 
   try {
     const result = await fetch('/api/upload-book', {method:'POST', body:fd}).then(readJson);
     const msg = result.inserted
-      ? `[OK] Đã thêm sách "${safe(result.title)}" - ${result.page_count} trang, ${result.chunk_count} đoạn.`
-      : `[i] Sách "${safe(result.title)}" đã có trong thư viện (${result.chunk_count} đoạn).`;
+      ? `[OK] Đã thêm "${safe(result.title)}" (${result.source_type}) - ${result.page_count} trang, ${result.chunk_count} đoạn.`
+      : `[i] "${safe(result.title)}" đã có trong thư viện (${result.chunk_count} đoạn).`;
     appendBotText(msg);
-    setStatus('Đã thêm sách xong');
+    setStatus('Đã thêm xong');
     await loadLibrary();
   } catch(err) {
-    appendBotText('Lỗi khi thêm sách: ' + err.message);
+    appendBotText('Lỗi khi thêm: ' + err.message);
     setStatus('Lỗi');
   }
 }

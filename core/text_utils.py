@@ -16,6 +16,7 @@ from core.config import (
     STOPWORDS,
 )
 
+
 # ---------------------------------------------------------------------------
 # Basic cleaning
 # ---------------------------------------------------------------------------
@@ -144,22 +145,240 @@ def query_terms(query: str, limit: int = QUERY_TERM_LIMIT) -> list[str]:
 # Chunking
 # ---------------------------------------------------------------------------
 
+# Common abbreviation list to avoid false sentence splits
+_ABBREVIATIONS = {
+    "mr.", "mrs.", "ms.", "dr.", "prof.", "sr.", "jr.", "vs.", "etc.", "e.g.", "i.e.",
+    "inc.", "ltd.", "llc.", "corp.", "co.", "u.s.", "u.k.", "e.u.", "p.m.", "a.m.",
+    "no.", "vol.", "ch.", "fig.", "tab.", "sec.", "pp.", "ed.", "trans.", "rev.",
+    "jan.", "feb.", "mar.", "apr.", "jun.", "jul.", "aug.", "sep.", "oct.", "nov.", "dec.",
+    "mon.", "tue.", "wed.", "thu.", "fri.", "sat.", "sun.",
+}
+
+
+def _split_headers(text: str) -> list[str]:
+    """Split text on markdown/ATX headers, numbered sections, or ALL-CAPS lines.
+
+    Returns a list of sections. Headers are kept attached to the following content.
+    """
+    # Patterns: # Header, ## Header, 1. Title, Chapter 1, ALL CAPS LINE (3+ words)
+    header_pattern = re.compile(
+        r"(?m)^("
+        r"(?:#{1,6}\s+.+)"              # Markdown headers
+        r"|(?:\d+\.\s+[A-Z].+)"         # Numbered sections: "1. Introduction"
+        r"|(?:[A-Z][A-Z\s]{2,}:)"       # ALL CAPS with colon: "INTRODUCTION:"
+        r"|(?:Chapter\s+\d+[:\.\s])"    # Chapter N
+        r"|(?:Section\s+\d+[:\.\s])"    # Section N
+        r"|(?:Appendix\s+[A-Z][:\.\s])" # Appendix A
+        r")",
+        re.MULTILINE,
+    )
+    parts = header_pattern.split(text)
+    if not parts or len(parts) == 1:
+        return [text]
+
+    # Reconstruct: header + following content
+    sections = []
+    for i in range(1, len(parts), 2):
+        header = parts[i].strip()
+        content = parts[i + 1] if i + 1 < len(parts) else ""
+        sections.append(f"{header}\n{content}".strip())
+    return sections
+
+
+def _split_paragraphs(text: str) -> list[str]:
+    """Split text on blank lines (double newline), preserving single newlines.
+    
+    Also merges header-like lines (markdown headers, numbered sections, ALL CAPS)
+    with the following paragraph so they don't become standalone fragments.
+    """
+    paragraphs = re.split(r"\n\s*\n", text)
+    cleaned = [clean_text(p) for p in paragraphs if p.strip()]
+    
+    # Merge header-like lines with following paragraph
+    merged: list[str] = []
+    header_pattern = re.compile(
+        r"^("
+        r"(?:#{1,6}\s+.+)"
+        r"|(?:\d+\.\s+[A-Z].+)"
+        r"|(?:[A-Z][A-Z\s]{2,}:)"
+        r"|(?:Chapter\s+\d+[:\.\s])"
+        r"|(?:Section\s+\d+[:\.\s])"
+        r"|(?:Appendix\s+[A-Z][:\.\s])"
+        r")$"
+    )
+    i = 0
+    while i < len(cleaned):
+        p = cleaned[i]
+        if (i + 1 < len(cleaned) and 
+            not p.rstrip().endswith(('.', '!', '?', '。', '！', '？')) and
+            header_pattern.match(p.strip())):
+            # Header line - merge with next paragraph
+            merged.append(p + " " + cleaned[i + 1])
+            i += 2
+        else:
+            merged.append(p)
+            i += 1
+    return merged
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into sentences, respecting common abbreviations."""
+    # Split on sentence-ending punctuation followed by whitespace + capital letter
+    # or end of string. Avoid splitting on abbreviations.
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])|(?<=[。！？])\s*", text)
+    # Post-process to fix abbreviation false splits
+    merged: list[str] = []
+    for s in sentences:
+        s = s.strip()
+        if not s:
+            continue
+        if merged and any(merged[-1].lower().endswith(abbr) for abbr in _ABBREVIATIONS):
+            merged[-1] = merged[-1] + " " + s
+        else:
+            merged.append(s)
+    return merged
+
+
+def _merge_to_target(
+    units: list[str],
+    target_chars: int,
+    overlap_chars: int,
+    min_len: int,
+    min_step: int = 0,
+) -> list[str]:
+    """Greedily merge text units until target_chars is reached, then emit chunk.
+
+    Carries overlap_chars from end of previous chunk to start of next.
+    When *min_step* > 0, ensures each new chunk starts at least *min_step*
+    characters after the previous chunk's start (in cumulative character offsets),
+    skipping overlapping units that would violate the step constraint.
+
+    Tries to split at natural boundaries (transition words, paragraph breaks)
+    when nearing target_chars instead of splitting mid-sentence.
+    """
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    cum_offset = 0  # cumulative character offset for min_step enforcement
+
+    # Transition words that indicate a natural boundary
+    _transitions = re.compile(
+        r"^(However|Moreover|Furthermore|Nevertheless|In addition|"
+        r"Additionally|Therefore|Thus|Consequently|As a result|"
+        r"On the other hand|In contrast|Specifically|In particular|"
+        r"First|Second|Third|Finally|In summary|To illustrate|"
+        r"For example|For instance|Notably|Importantly)\b",
+        re.IGNORECASE,
+    )
+
+    for unit in units:
+        unit = unit.strip()
+        if not unit:
+            cum_offset += 0  # empty units have 0 characters
+            continue
+        ulen = len(unit)
+
+        # If a single unit exceeds target, split it further
+        if ulen > target_chars:
+            if current:
+                chunk_text = clean_text(" ".join(current))
+                chunks.append(chunk_text)
+                current = []
+                current_len = 0
+                cum_offset += len(chunk_text)
+            # Fallback: character split for this oversized unit
+            for i in range(0, ulen, target_chars):
+                part = unit[i : i + target_chars]
+                if len(part) >= min_len:
+                    chunks.append(part)
+            cum_offset += ulen
+            continue
+
+        # Check whether adding this unit would exceed target
+        if current_len + ulen > target_chars and current:
+            # Try to split at a natural boundary (transition word) in current
+            split_at = None
+            for i, cu in enumerate(current):
+                if _transitions.match(cu) and i > max(1, len(current) // 3):
+                    split_at = i
+                    break
+            if split_at is not None:
+                pre = current[:split_at]
+                post = current[split_at:]
+                chunk_text = clean_text(" ".join(pre))
+                if len(chunk_text) >= min_len:
+                    chunks.append(chunk_text)
+                cum_offset += len(chunk_text)
+                current = post
+                current_len = sum(len(u) for u in post)
+                # Still may need to emit if still over target
+                if current_len + ulen > target_chars and current:
+                    chunk_text = clean_text(" ".join(current))
+                    if len(chunk_text) >= min_len:
+                        chunks.append(chunk_text)
+                    cum_offset += len(chunk_text)
+                    current = []
+                    current_len = 0
+            else:
+                chunk_text = clean_text(" ".join(current))
+                if len(chunk_text) >= min_len:
+                    chunks.append(chunk_text)
+                cum_offset += len(chunk_text)
+
+            # Start new chunk with overlap from previous, respecting min_step
+            overlap_text = chunks[-1][-overlap_chars:] if chunks else ""
+            # Enforce min_step: skip overlap if it would place us too close
+            if min_step > 0 and chunks:
+                last_start = cum_offset - len(chunks[-1])
+                potential_start = cum_offset - len(overlap_text)
+                if potential_start - last_start < min_step:
+                    overlap_text = ""
+            current = [overlap_text, unit] if overlap_text else [unit]
+            current_len = len(overlap_text) + ulen
+        else:
+            current.append(unit)
+            current_len += ulen
+
+    # Emit final chunk
+    if current:
+        merged = clean_text(" ".join(current))
+        if len(merged) >= min_len:
+            chunks.append(merged)
+
+    return chunks
+
 
 def chunk_pages(
     pages: list[tuple[int, str]],
     chunk_chars: int = CHUNK_CHARS,
     overlap: int = CHUNK_OVERLAP,
 ) -> list[dict]:
-    """Split page texts into overlapping chunks suitable for FTS indexing."""
+    """Split page texts into semantically-coherent overlapping chunks.
+
+    Recursively splits on headers -> paragraphs -> sentences -> characters,
+    then merges units until target size is reached.
+    """
     chunks: list[dict] = []
-    step = max(CHUNK_MIN_STEP, chunk_chars - overlap)
     for page_number, text in pages:
-        start = 0
-        while start < len(text):
-            chunk = clean_text(text[start : start + chunk_chars])
-            if len(chunk) >= CHUNK_MIN_LEN:
-                chunks.append({"page_start": page_number, "page_end": page_number, "text": chunk})
-            start += step
+        text = clean_text(text)
+        if not text:
+            continue
+
+        # Recursive splitting: headers -> paragraphs -> sentences
+        sections = _split_headers(text)
+        all_sentences: list[str] = []
+        for sec in sections:
+            for para in _split_paragraphs(sec):
+                all_sentences.extend(_split_sentences(para))
+
+        # Merge sentences into target-sized chunks
+        page_chunks = _merge_to_target(
+            all_sentences, chunk_chars, overlap, CHUNK_MIN_LEN, CHUNK_MIN_STEP
+        )
+
+        for ch in page_chunks:
+            chunks.append({"page_start": page_number, "page_end": page_number, "text": ch})
+
     return chunks
 
 
@@ -206,7 +425,7 @@ def clip(value: float, low: float = 0, high: float = 100) -> int:
 # ---------------------------------------------------------------------------
 
 
-def unique(items: list[dict], limit: int = 10) -> list[dict]:
+def unique(items: list[dict], limit: int = 50) -> list[dict]:
     """Deduplicate search results by (document_id, chunk_id, page_start, snippet)."""
     seen: set = set()
     result: list[dict] = []
@@ -231,7 +450,7 @@ def unique(items: list[dict], limit: int = 10) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def annual_hits(pages: list[tuple[int, str]], query: str, limit: int = 6) -> list[dict]:
+def annual_hits(pages: list[tuple[int, str]], query: str, limit: int = 10) -> list[dict]:
     """Score raw pages against *query* terms and return top hits."""
     terms = query_terms(query)
     scored: list[dict] = []

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from urllib.request import Request, urlopen
 
+from core.cache import LRUCache
 from core.config import (
     EXECUTION_TERMS,
     GROWTH_TERMS,
@@ -80,15 +82,20 @@ def build_context(citations: list[dict]) -> str:
     based on its rank so the model can weigh evidence appropriately.
     Evidence is wrapped in XML-style delimiters so the model treats the
     content strictly as data rather than as instructions.
+
+    When an item has *context_text* (full chunk text from ``expand_context``)
+    it is used instead of the short *snippet*, giving the LLM richer context.
     """
     blocks: list[str] = []
     for index, item in enumerate(citations, start=1):
         relevance = "High" if index <= 2 else "Medium" if index <= 5 else "Supporting"
         page = f" page {item.get('page_start')}" if item.get("page_start") else ""
+        # Prefer full context_text over the 420-char snippet when available
+        text = item.get("context_text") or item.get("snippet", "")
         blocks.append(
             f"[{index}] {item.get('title', 'Source')} "
             f"({item.get('source_type', 'source')}{page}) — {relevance}\n"
-            f"{item.get('snippet', '')}"
+            f"{text}"
         )
     inner = "\n\n".join(blocks)
     return f"<retrieved_evidence>\n{inner}\n</retrieved_evidence>"
@@ -278,6 +285,11 @@ def call_openai_llm(
     if not api_key:
         return None
 
+    cache_key = f"{model}||{question}||{_citations_hash(citations)}"
+    cached = _llm_cache.get(cache_key)
+    if cached is not None:
+        return str(cached)
+
     context = build_context(citations)
     system_content = (
         system_prompt
@@ -330,7 +342,10 @@ def call_openai_llm(
         "temperature": 0.2,
     }
     result = _post_chat_completion(payload, api_key, base_url, LLM_STREAM_TIMEOUT)
-    return _extract_message(result)
+    answer = _extract_message(result)
+    if answer:
+        _llm_cache.put(cache_key, answer)
+    return answer
 
 
 def _extract_message(result: dict) -> str | None:
@@ -366,6 +381,18 @@ def _extract_message(result: dict) -> str | None:
             if content.get("type") in {"output_text", "text"} and content.get("text"):
                 parts.append(content["text"])
     return "\n".join(parts).strip() or None
+
+
+_llm_cache = LRUCache(maxsize=500, default_ttl=3600)
+
+
+def _citations_hash(citations: list[dict]) -> str:
+    """Deterministic hash of citation content for cache key."""
+    parts = sorted(
+        f"{c.get('document_id','')}:{c.get('chunk_id','')}:{c.get('snippet','')[:120]}"
+        for c in citations
+    )
+    return hashlib.sha256("".join(parts).encode()).hexdigest()[:16]
 
 
 # ---------------------------------------------------------------------------
@@ -481,16 +508,24 @@ def answer_question(
         sub_queries = decompose_query(question, api_key, model, base_url)
     else:
         sub_queries = [question]
+    # Always include the original question so decomposed sub-queries don't
+    # miss the user's actual intent.
+    if question not in sub_queries:
+        sub_queries.append(question)
     all_citations: list[dict] = []
+    citations: list[dict] = []
 
     for iteration in range(max_iterations + 1):
         for q in sub_queries:
-            all_citations.extend(store.hybrid_search(q, ["book", "annual_report"], 20))
-        citations = unique(all_citations, 30)
+            all_citations.extend(store.hybrid_search(q, ["book", "annual_report"], 30))
+        citations = unique(all_citations, 50)
         if citations:
             # Re-rank against the English query so relevance matches the English snippets.
             rerank_query = " ".join(sub_queries) if sub_queries else question
             citations = rerank(rerank_query, citations, top_k=RERANK_TOP_K)
+            # Expand context with full text + neighboring chunks
+            expanded = store.expand_context(citations)
+            citations = expanded[:RERANK_TOP_K]
 
         if not use_iterative or iteration == max_iterations:
             break
@@ -619,8 +654,8 @@ def generate_kb_company_report(
     ]
     citations: list[dict] = []
     for query in queries:
-        citations.extend(store.hybrid_search(query, ["book", "annual_report"], 5))
-    citations = unique(citations, 14)
+        citations.extend(store.hybrid_search(query, ["book", "annual_report"], 10))
+    citations = unique(citations, 30)
 
     prompt = (
         f"Company: {company} ({ticker})\n\n"

@@ -28,21 +28,21 @@ MAX_RUNS: int = 50
 # Chunking & retrieval tunables
 # ---------------------------------------------------------------------------
 # Default chunk sizing for reference books.
-CHUNK_CHARS: int = 1400
-CHUNK_OVERLAP: int = 180
+CHUNK_CHARS: int = 1600
+CHUNK_OVERLAP: int = 250
 CHUNK_MIN_STEP: int = 400          # minimum slide between chunk windows
 CHUNK_MIN_LEN: int = 120           # discard chunks shorter than this
 # Denser annual-report chunks improve retrieval precision.
 REPORT_CHUNK_CHARS: int = 800
-REPORT_CHUNK_OVERLAP: int = 120
+REPORT_CHUNK_OVERLAP: int = 180
 # Snippet extraction.
-SNIPPET_MAX_CHARS: int = 420
+SNIPPET_MAX_CHARS: int = 500
 # Query tokenisation cap.
-QUERY_TERM_LIMIT: int = 14
+QUERY_TERM_LIMIT: int = 20
 # Number of recent documents surfaced by Store.stats().
-RECENT_DOCS_LIMIT: int = 12
-# Cross-encoder rerank cutoff.
-RERANK_TOP_K: int = 5
+RECENT_DOCS_LIMIT: int = 20
+# Cross-encoder rerank cutoff (how many final evidence chunks passed to LLM).
+RERANK_TOP_K: int = 15
 # LLM HTTP timeouts (seconds).
 LLM_TIMEOUT: int = 120
 LLM_STREAM_TIMEOUT: int = 300  # longer for streaming: free models can take minutes to first token
