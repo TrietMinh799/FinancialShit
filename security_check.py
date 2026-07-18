@@ -27,14 +27,9 @@ def check_osv(name, version):
         "package": {"name": name, "ecosystem": "PyPI"}
     }).encode("utf-8")
     req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-    
-    # Bypass SSL verification if needed, although mostly fine
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
 
     try:
-        with urllib.request.urlopen(req, context=ctx) as response:
+        with urllib.request.urlopen(req) as response:
             res_data = json.loads(response.read().decode("utf-8"))
             return res_data.get("vulns", [])
     except Exception as e:

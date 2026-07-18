@@ -9,6 +9,7 @@ description = "M&A Valuation RAG — retrieves evidence from books and annual re
 requires-python = ">=3.12"
 dependencies = [
     "flask>=3",
+    "flask-limiter>=3",
     "python-dotenv>=1",
     "pypdf>=5",
     "pdfplumber>=0.11",

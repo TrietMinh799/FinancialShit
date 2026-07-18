@@ -40,6 +40,20 @@ function renderMarkdown(text) {
     return tbl + '</table>';
   });
 
+  // Citation references [N] — convert to styled badges BEFORE block processing
+  // Match [N] where N is 1-3 digits, but not inside a markdown link [text](url)
+  text = text.replace(/(?<!\]\([^)]*)\[(\d{1,3})\](?!\([^)]*\))/g,
+    '<span class="citation-ref">$1</span>');
+
+  // Clean up snippet truncation noise: "word ..." → "word…"
+  // and "... word" → "… word"
+  text = text.replace(/\.{3}\s/g, '… ').replace(/\s\.{3}/g, '…');
+
+  // Clean up raw <br> tags that leaked from the LLM output (e.g. from
+  // chunk text that contained <br>).  These are now literal "&lt;br&gt;"
+  // after safe() escaped them, so convert them to actual line breaks.
+  text = text.replace(/&lt;br\s*\/?&gt;/gi, '\n');
+
   // Split into blocks by blank lines
   return text.split(/\n{2,}/).map(block => {
     block = block.trim();
@@ -50,10 +64,15 @@ function renderMarkdown(text) {
 
     const lines = block.split('\n');
 
-    // Heading
-    if (/^#{1,6}\s/.test(block)) {
-      const level = block.indexOf(' ');
-      return `<h${level}>${inlineMd(block.slice(level + 1))}</h${level}>`;
+    // Heading — may be followed by other content without a blank line,
+    // so extract just the first line as the heading and process the rest.
+    if (/^#{1,6}\s/.test(lines[0])) {
+      const level = lines[0].indexOf(' ');
+      const heading = `<h${level}>${inlineMd(lines[0].slice(level + 1))}</h${level}>`;
+      const rest = lines.slice(1).join('\n').trim();
+      if (!rest) return heading;
+      // Process the remaining lines as a separate block
+      return heading + '\n' + _renderBlock(rest);
     }
 
     // Horizontal rule
@@ -80,6 +99,37 @@ function renderMarkdown(text) {
       i > 0 ? `<br>${inlineMd(l)}` : inlineMd(l)
     ).join('') + '</p>';
   }).filter(Boolean).join('\n');
+}
+
+function _renderBlock(block) {
+  block = block.trim();
+  if (!block) return '';
+  if (block[0] === '<') return block;
+  const lines = block.split('\n');
+
+  if (/^#{1,6}\s/.test(lines[0])) {
+    const level = lines[0].indexOf(' ');
+    const heading = `<h${level}>${inlineMd(lines[0].slice(level + 1))}</h${level}>`;
+    const rest = lines.slice(1).join('\n').trim();
+    if (!rest) return heading;
+    return heading + '\n' + _renderBlock(rest);
+  }
+  if (/^[-*_]{3,}$/.test(block)) return '<hr>';
+  if (lines.every(l => /^[-*+]\s/.test(l))) {
+    return '<ul>' + lines.map(l => {
+      const m = l.match(/^[-*+]\s+(.*)/);
+      return m ? `<li>${inlineMd(m[1])}</li>` : '';
+    }).join('') + '</ul>';
+  }
+  if (lines.every(l => /^\d+\.\s/.test(l))) {
+    return '<ol>' + lines.map(l => {
+      const m = l.match(/^\d+\.\s+(.*)/);
+      return m ? `<li>${inlineMd(m[1])}</li>` : '';
+    }).join('') + '</ol>';
+  }
+  return '<p>' + lines.map((l, i) =>
+    i > 0 ? `<br>${inlineMd(l)}` : inlineMd(l)
+  ).join('') + '</p>';
 }
 
 function inlineMd(text) {
@@ -283,7 +333,10 @@ async function loadLibrary() {
 async function deleteBook(id) {
   if (!confirm('Xóa tài liệu này?')) return;
   try {
-    const res = await fetch(`/api/books/${id}`, { method: 'DELETE' }).then(readJson);
+    const res = await fetch(`/api/books/${id}`, {
+      method: 'DELETE',
+      headers: {'X-Requested-With': 'XMLHttpRequest'}
+    }).then(readJson);
     if (res.error) throw new Error(res.error);
     loadLibrary();
   } catch(e) {
@@ -521,11 +574,15 @@ async function sendQuestion(question) {
           return;
         }
         const decoder = new TextDecoder();
+        let sseBuffer = '';
         while (true) {
           const {done, value} = await reader.read();
           if (done) break;
-          const text = decoder.decode(value, {stream: true});
-          for (const line of text.split('\n')) {
+          sseBuffer += decoder.decode(value, {stream: true});
+          const lines = sseBuffer.split('\n');
+          // Keep the last (possibly incomplete) line in the buffer
+          sseBuffer = lines.pop() || '';
+          for (const line of lines) {
             if (line.startsWith('data: ')) {
               const data = JSON.parse(line.slice(6));
               if (data.status) {
@@ -630,7 +687,11 @@ async function submitBook() {
   fd.append('source_type', sourceType);
 
   try {
-    const result = await fetch('/api/upload-book', {method:'POST', body:fd}).then(readJson);
+    const result = await fetch('/api/upload-book', {
+      method: 'POST',
+      headers: {'X-Requested-With': 'XMLHttpRequest'},
+      body: fd
+    }).then(readJson);
     const msg = result.inserted
       ? `[OK] Đã thêm "${safe(result.title)}" (${result.source_type}) - ${result.page_count} trang, ${result.chunk_count} đoạn.`
       : `[i] "${safe(result.title)}" đã có trong thư viện (${result.chunk_count} đoạn).`;
@@ -664,7 +725,11 @@ async function submitReport() {
   fd.append('base_url', baseUrl());
 
   try {
-    const r = await fetch('/api/analyze-report', {method:'POST', body:fd}).then(readJson);
+    const r = await fetch('/api/analyze-report', {
+      method: 'POST',
+      headers: {'X-Requested-With': 'XMLHttpRequest'},
+      body: fd
+    }).then(readJson);
     renderAnalysis(r, company, ticker);
     setStatus('Phân tích hoàn thành');
     await loadLibrary();

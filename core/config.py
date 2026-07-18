@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
 from collections import OrderedDict
 from pathlib import Path
 
@@ -15,7 +14,8 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 # Paths & storage
 # ---------------------------------------------------------------------------
-ROOT = Path(tempfile.gettempdir()) / "valuation_rag_platform_epub_clean"
+DATA_DIR = Path(os.environ.get("DATA_DIR", Path.cwd() / "data"))
+ROOT = DATA_DIR
 UPLOAD_DIR = ROOT / "uploads"
 DB_PATH = ROOT / "rag.sqlite3"
 CHROMA_DIR = ROOT / "chroma"

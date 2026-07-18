@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -10,6 +11,8 @@ from sentence_transformers import SentenceTransformer
 
 from core.cache import LRUCache
 from core.config import CHROMA_DIR, SNIPPET_MAX_CHARS
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Embedding model
@@ -36,6 +39,8 @@ def _get_model() -> SentenceTransformer:
     return _model
 
 
+# Embedding cache: key = hash(text), value = embedding vector
+# Using hash instead of full text as key saves memory
 _embed_cache = LRUCache(maxsize=2000, default_ttl=None)
 _search_cache = LRUCache(maxsize=500, default_ttl=120)
 
@@ -46,23 +51,28 @@ def load_embedding_model() -> None:
 
 
 def _embed(texts: list[str]) -> list[list[float]]:
-    cached: list[list[float]] = []
+    """Embed texts with caching (hash-based keys for memory efficiency)."""
+    import hashlib
+
+    cached: list[tuple[int, list[float]]] = []
     uncached: list[int] = []
     uncached_texts: list[str] = []
 
     for i, t in enumerate(texts):
-        key = f"{_MODEL_NAME}||{t}"
+        key = hashlib.sha256(t.encode()).hexdigest()[:32]
         val = _embed_cache.get(key)
         if val is not None:
-            cached.append((i, val))
+            cached.append((i, list(val)))  # type: ignore[arg-type]
         else:
             uncached.append(i)
             uncached_texts.append(t)
 
     if uncached_texts:
-        new_vecs = _get_model().encode(uncached_texts, normalize_embeddings=True).tolist()
+        new_vecs: list[list[float]] = _get_model().encode(
+            uncached_texts, normalize_embeddings=True
+        ).tolist()
         for idx, vec in zip(uncached, new_vecs, strict=False):
-            key = f"{_MODEL_NAME}||{texts[idx]}"
+            key = hashlib.sha256(texts[idx].encode()).hexdigest()[:32]
             _embed_cache.put(key, vec)
             cached.append((idx, vec))
 
@@ -161,7 +171,7 @@ class VectorStore:
         cache_key = f"{_MODEL_NAME}||{query}||{sorted(source_types or ['book'])}||{limit}"
         cached = _search_cache.get(cache_key)
         if cached is not None:
-            return cached
+            return list(cached)  # type: ignore[arg-type]
 
         query_emb = _embed([query])
         collection_names = self._resolve(source_types)
@@ -242,5 +252,5 @@ class VectorStore:
         for coll in self._client.list_collections():
             try:
                 coll.delete(where={"document_id": str(document_id)})
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("ChromaDB delete failed in collection %s: %s", coll.name, exc)

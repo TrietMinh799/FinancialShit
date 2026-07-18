@@ -17,20 +17,21 @@ from core.config import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Basic cleaning
-# ---------------------------------------------------------------------------
+# Module-level compiled patterns for basic cleaning
+_WHITESPACE_PATTERN = re.compile(r"\s+")
+_SCRIPT_STYLE_PATTERN = re.compile(r"(?is)<(script|style).*?</\1>")
+_TAG_STRIP_PATTERN = re.compile(r"(?s)<[^>]+>")
 
 
 def clean_text(value: str | None) -> str:
     """Collapse whitespace and strip leading/trailing space."""
-    return re.sub(r"\s+", " ", value or "").strip()
+    return _WHITESPACE_PATTERN.sub(" ", value or "").strip()
 
 
 def strip_markup(value: str | None) -> str:
     """Remove HTML/XML tags and unescape entities, then clean whitespace."""
-    value = re.sub(r"(?is)<(script|style).*?</\1>", " ", value or "")
-    value = re.sub(r"(?s)<[^>]+>", " ", value)
+    value = _SCRIPT_STYLE_PATTERN.sub(" ", value or "")
+    value = _TAG_STRIP_PATTERN.sub(" ", value)
     return clean_text(html.unescape(value))
 
 
@@ -39,7 +40,7 @@ def strip_markup(value: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 # Phrases commonly used to hijack an LLM via injected document content.
-_INJECTION_PATTERNS: list[re.Pattern[str]] = [
+_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
     for p in (
         r"ignore\s+(all\s+)?(previous|above|prior|earlier|preceding)\s+(instructions?|prompts?|rules?|context)",
@@ -53,16 +54,86 @@ _INJECTION_PATTERNS: list[re.Pattern[str]] = [
         r"switch\s+(to|into)\s+(a\s+)?(new\s+)?(role|mode|persona)",
         r"system\s*:\s*",
         r"<\s*/?\s*system\s*>",
+        r"<\s*/?\s*retrieved_evidence\s*>",
         r"<<\s*SYS\s*>>",
+        r"<<\s*/\s*SYS\s*>>",
         r"\[INST\]",
         r"\[/INST\]",
+        r"\[SYS\]",
+        r"\[/SYS\]",
         r"BEGIN\s+(INSTRUCTION|SYSTEM|PROMPT)",
         r"END\s+(INSTRUCTION|SYSTEM|PROMPT)",
         r"###\s*(instruction|system|prompt)",
     )
-]
+)
 
 _INJECTION_REPLACEMENT = "[content removed]"
+
+
+# ---------------------------------------------------------------------------
+# Pre-compiled regex patterns (module-level to avoid recompilation)
+# ---------------------------------------------------------------------------
+
+# Control character removal (except normal whitespace)
+_CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+# HTML/XML tag stripping
+_SCRIPT_STYLE_PATTERN = re.compile(r"(?is)<(script|style).*?</\1>")
+_TAG_STRIP_PATTERN = re.compile(r"(?s)<[^>]+>")
+
+# Header splitting patterns
+_HEADER_PATTERN = re.compile(
+    r"(?m)^("
+    r"(?:#{1,6}\s+.+)"              # Markdown headers
+    r"|(?:\d+\.\s+[A-Z].+)"         # Numbered sections: "1. Introduction"
+    r"|(?:[A-Z][A-Z\s]{2,}:)"       # ALL CAPS with colon: "INTRODUCTION:"
+    r"|(?:Chapter\s+\d+[:\.\s])"    # Chapter N
+    r"|(?:Section\s+\d+[:\.\s])"    # Section N
+    r"|(?:Appendix\s+[A-Z][:\.\s])" # Appendix A
+    r")",
+    re.MULTILINE,
+)
+
+# Header-like line pattern (for merging with following paragraph)
+_HEADER_LINE_PATTERN = re.compile(
+    r"^("
+    r"(?:#{1,6}\s+.+)"
+    r"|(?:\d+\.\s+[A-Z].+)"
+    r"|(?:[A-Z][A-Z\s]{2,}:)"
+    r"|(?:Chapter\s+\d+[:\.\s])"
+    r"|(?:Section\s+\d+[:\.\s])"
+    r"|(?:Appendix\s+[A-Z][:\.\s])"
+    r")$"
+)
+
+# Sentence splitting (respects common abbreviations)
+_SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+(?=[A-Z])|(?<=[。！？])\s*")
+
+# Common abbreviations to avoid false sentence splits
+_ABBREVIATIONS = {
+    "mr.", "mrs.", "ms.", "dr.", "prof.", "sr.", "jr.", "vs.", "etc.", "e.g.", "i.e.",
+    "inc.", "ltd.", "llc.", "corp.", "co.", "u.s.", "u.k.", "e.u.", "p.m.", "a.m.",
+    "no.", "vol.", "ch.", "fig.", "tab.", "sec.", "pp.", "ed.", "trans.", "rev.",
+    "jan.", "feb.", "mar.", "apr.", "jun.", "jul.", "aug.", "sep.", "oct.", "nov.", "dec.",
+    "mon.", "tue.", "wed.", "thu.", "fri.", "sat.", "sun.",
+}
+
+# Transition words that indicate natural boundaries
+_TRANSITIONS_PATTERN = re.compile(
+    r"^(However|Moreover|Furthermore|Nevertheless|In addition|"
+    r"Additionally|Therefore|Thus|Consequently|As a result|"
+    r"On the other hand|In contrast|Specifically|In particular|"
+    r"First|Second|Third|Finally|In summary|To illustrate|"
+    r"For example|For instance|Notably|Importantly)\b",
+    re.IGNORECASE,
+)
+
+# Tokenization: words only (no digits, no underscores)
+_TOKEN_PATTERN = re.compile(r"[^\W\d_][^\W_]+")
+
+# Vietnamese đ/Đ normalization
+_VIETNAMESE_D_LOWER = "\u0111"
+_VIETNAMESE_D_UPPER = "\u0110"
 
 
 def sanitize_injection(text: str) -> str:
@@ -88,8 +159,8 @@ def sanitize_field(value: str, max_len: int = _FIELD_MAX_LEN) -> str:
     * Truncates to *max_len*
     """
     value = clean_text(value)
-    # Remove control chars (except normal whitespace)
-    value = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", value)
+    # Remove control chars (except normal whitespace) using precompiled pattern
+    value = _CONTROL_CHARS_PATTERN.sub("", value)
     # Strip role/tag markers that could shift the LLM's role perception
     for pattern in _INJECTION_PATTERNS:
         value = pattern.sub("", value)
@@ -131,7 +202,7 @@ def query_terms(query: str, limit: int = QUERY_TERM_LIMIT) -> list[str]:
     """
     terms: list[str] = []
     for raw in (query, remove_diacritics(query)):
-        for token in re.findall(r"[^\W\d_][^\W_]+", raw.lower()):
+        for token in _TOKEN_PATTERN.findall(raw.lower()):
             if len(token) < 3 or token in STOPWORDS:
                 continue
             if token not in terms:
@@ -160,19 +231,7 @@ def _split_headers(text: str) -> list[str]:
 
     Returns a list of sections. Headers are kept attached to the following content.
     """
-    # Patterns: # Header, ## Header, 1. Title, Chapter 1, ALL CAPS LINE (3+ words)
-    header_pattern = re.compile(
-        r"(?m)^("
-        r"(?:#{1,6}\s+.+)"              # Markdown headers
-        r"|(?:\d+\.\s+[A-Z].+)"         # Numbered sections: "1. Introduction"
-        r"|(?:[A-Z][A-Z\s]{2,}:)"       # ALL CAPS with colon: "INTRODUCTION:"
-        r"|(?:Chapter\s+\d+[:\.\s])"    # Chapter N
-        r"|(?:Section\s+\d+[:\.\s])"    # Section N
-        r"|(?:Appendix\s+[A-Z][:\.\s])" # Appendix A
-        r")",
-        re.MULTILINE,
-    )
-    parts = header_pattern.split(text)
+    parts = _HEADER_PATTERN.split(text)
     if not parts or len(parts) == 1:
         return [text]
 
@@ -194,24 +253,14 @@ def _split_paragraphs(text: str) -> list[str]:
     paragraphs = re.split(r"\n\s*\n", text)
     cleaned = [clean_text(p) for p in paragraphs if p.strip()]
     
-    # Merge header-like lines with following paragraph
+    # Merge header-like lines with following paragraph using module-level pattern
     merged: list[str] = []
-    header_pattern = re.compile(
-        r"^("
-        r"(?:#{1,6}\s+.+)"
-        r"|(?:\d+\.\s+[A-Z].+)"
-        r"|(?:[A-Z][A-Z\s]{2,}:)"
-        r"|(?:Chapter\s+\d+[:\.\s])"
-        r"|(?:Section\s+\d+[:\.\s])"
-        r"|(?:Appendix\s+[A-Z][:\.\s])"
-        r")$"
-    )
     i = 0
     while i < len(cleaned):
         p = cleaned[i]
         if (i + 1 < len(cleaned) and 
             not p.rstrip().endswith(('.', '!', '?', '。', '！', '？')) and
-            header_pattern.match(p.strip())):
+            _HEADER_LINE_PATTERN.match(p.strip())):
             # Header line - merge with next paragraph
             merged.append(p + " " + cleaned[i + 1])
             i += 2
@@ -223,9 +272,8 @@ def _split_paragraphs(text: str) -> list[str]:
 
 def _split_sentences(text: str) -> list[str]:
     """Split text into sentences, respecting common abbreviations."""
-    # Split on sentence-ending punctuation followed by whitespace + capital letter
-    # or end of string. Avoid splitting on abbreviations.
-    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z])|(?<=[。！？])\s*", text)
+    # Use precompiled pattern
+    sentences = _SENTENCE_SPLIT_PATTERN.split(text)
     # Post-process to fix abbreviation false splits
     merged: list[str] = []
     for s in sentences:
@@ -261,16 +309,6 @@ def _merge_to_target(
     current_len = 0
     cum_offset = 0  # cumulative character offset for min_step enforcement
 
-    # Transition words that indicate a natural boundary
-    _transitions = re.compile(
-        r"^(However|Moreover|Furthermore|Nevertheless|In addition|"
-        r"Additionally|Therefore|Thus|Consequently|As a result|"
-        r"On the other hand|In contrast|Specifically|In particular|"
-        r"First|Second|Third|Finally|In summary|To illustrate|"
-        r"For example|For instance|Notably|Importantly)\b",
-        re.IGNORECASE,
-    )
-
     for unit in units:
         unit = unit.strip()
         if not unit:
@@ -299,7 +337,7 @@ def _merge_to_target(
             # Try to split at a natural boundary (transition word) in current
             split_at = None
             for i, cu in enumerate(current):
-                if _transitions.match(cu) and i > max(1, len(current) // 3):
+                if _TRANSITIONS_PATTERN.match(cu) and i > max(1, len(current) // 3):
                     split_at = i
                     break
             if split_at is not None:
@@ -324,9 +362,14 @@ def _merge_to_target(
                 if len(chunk_text) >= min_len:
                     chunks.append(chunk_text)
                 cum_offset += len(chunk_text)
+                current = []
+                current_len = 0
 
             # Start new chunk with overlap from previous, respecting min_step
-            overlap_text = chunks[-1][-overlap_chars:] if chunks else ""
+            if current:
+                overlap_text = chunks[-1][-overlap_chars:] if chunks else ""
+            else:
+                overlap_text = chunks[-1][-overlap_chars:] if chunks else ""
             # Enforce min_step: skip overlap if it would place us too close
             if min_step > 0 and chunks:
                 last_start = cum_offset - len(chunks[-1])

@@ -109,6 +109,20 @@ class Store:
                     "USING fts5(text, content='chunks', content_rowid='id')"
                 )
 
+            # FTS5 sync triggers — keep chunk_fts in sync with chunks table
+            conn.executescript("""
+                CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+                    INSERT INTO chunk_fts(rowid, text) VALUES (new.id, new.text);
+                END;
+                CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+                    INSERT INTO chunk_fts(chunk_fts, rowid, text) VALUES ('delete', old.id, old.text);
+                END;
+                CREATE TRIGGER IF NOT EXISTS chunks_au AFTER UPDATE ON chunks BEGIN
+                    INSERT INTO chunk_fts(chunk_fts, rowid, text) VALUES ('delete', old.id, old.text);
+                    INSERT INTO chunk_fts(rowid, text) VALUES (new.id, new.text);
+                END;
+            """)
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_source_type ON documents(source_type)")
 
@@ -224,7 +238,6 @@ class Store:
             doc_id = cursor.lastrowid
             if doc_id is None:
                 raise RuntimeError("Failed to retrieve last inserted document ID")
-            fts = self._has_fts(conn)
 
             chunk_rows: list[tuple] = []
             sanitised_texts: list[str] = []
@@ -238,15 +251,7 @@ class Store:
                 chunk_rows,
             )
 
-            if fts:
-                chunk_ids = conn.execute(
-                    "SELECT id FROM chunks WHERE document_id = ? ORDER BY chunk_index",
-                    (doc_id,),
-                ).fetchall()
-                conn.executemany(
-                    "INSERT INTO chunk_fts(rowid, text) VALUES (?, ?)",
-                    [(r["id"], t) for r, t in zip(chunk_ids, sanitised_texts)],
-                )
+            # FTS5 is kept in sync by triggers (chunks_ai/chunks_ad/chunks_au)
 
             # Index into ChromaDB for vector search (with sanitised text)
             sanitised_chunks = [{**ch, "text": sanitised_texts[i]} for i, ch in enumerate(chunks)]
@@ -343,6 +348,14 @@ class Store:
             conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
 
         fpath = UPLOAD_DIR / doc["filename"]
+        # Guard against path traversal: the resolved path must stay within UPLOAD_DIR
+        try:
+            fpath = fpath.resolve()
+        except (OSError, RuntimeError):
+            fpath = UPLOAD_DIR / doc["filename"]
+        if not str(fpath).startswith(str(UPLOAD_DIR.resolve())):
+            logger.error("Path traversal blocked in delete_document: %s", fpath)
+            return {"ok": False, "document_id": document_id, "error": "Invalid path."}
         if fpath.exists():
             fpath.unlink()
 
@@ -513,48 +526,70 @@ class Store:
         if not items:
             return items
 
-        with self._connect() as conn:
-            # 1. Enrich original items with their own full text
-            for item in items:
-                doc_id = item.get("document_id")
-                chunk_id = item.get("chunk_id")
-                if doc_id is not None and chunk_id is not None:
-                    row = conn.execute(
-                        "SELECT text FROM chunks WHERE document_id = ? AND chunk_index = ?",
-                        (doc_id, chunk_id),
-                    ).fetchone()
-                    if row and row["text"]:
-                        item["context_text"] = row["text"]
+        # Collect all (document_id, chunk_index) pairs we need
+        needed: set[tuple[int, int]] = set()
+        for item in items:
+            doc_id = item.get("document_id")
+            chunk_id = item.get("chunk_id")
+            if doc_id is not None and chunk_id is not None:
+                needed.add((doc_id, chunk_id))
+                # Neighbors
+                for offset in range(-neighbor_window, neighbor_window + 1):
+                    if offset == 0:
+                        continue
+                    target = chunk_id + offset
+                    if target >= 0:
+                        needed.add((doc_id, target))
 
-            # 2. Neighbor chunks
-            doc_chunk_map: dict[int, set[int]] = {}
-            for item in items:
-                doc_id = item.get("document_id")
-                chunk_id = item.get("chunk_id")
-                if doc_id is not None and chunk_id is not None:
-                    doc_chunk_map.setdefault(doc_id, set()).add(chunk_id)
+        # Batch fetch all needed chunk texts in a single query
+        chunk_texts: dict[tuple[int, int], str] = {}
+        if needed:
+            placeholders = ",".join("(?, ?)" for _ in needed)
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"SELECT document_id, chunk_index, text FROM chunks "
+                    f"WHERE (document_id, chunk_index) IN ({placeholders})",
+                    [val for pair in needed for val in pair],
+                ).fetchall()
+                for row in rows:
+                    if row["text"]:
+                        chunk_texts[(row["document_id"], row["chunk_index"])] = row["text"]
 
-            for doc_id, chunk_ids in doc_chunk_map.items():
-                for cid in chunk_ids:
-                    for offset in range(-neighbor_window, neighbor_window + 1):
-                        if offset == 0:
-                            continue  # already handled above
-                        target = cid + offset
-                        if target < 0:
-                            continue
-                        row = conn.execute(
-                            "SELECT text FROM chunks WHERE document_id = ? AND chunk_index = ?",
-                            (doc_id, target),
-                        ).fetchone()
-                        if row and row["text"]:
-                            items.append(
-                                {
-                                    "document_id": doc_id,
-                                    "chunk_id": target,
-                                    "context_text": row["text"],
-                                    "expanded": True,
-                                }
-                            )
+        # 1. Enrich original items with their own full text
+        for item in items:
+            doc_id = item.get("document_id")
+            chunk_id = item.get("chunk_id")
+            if doc_id is not None and chunk_id is not None:
+                text = chunk_texts.get((doc_id, chunk_id))
+                if text:
+                    item["context_text"] = text
+
+        # 2. Neighbor chunks (append as new items with expanded=True)
+        doc_chunk_map: dict[int, set[int]] = {}
+        for item in items:
+            doc_id = item.get("document_id")
+            chunk_id = item.get("chunk_id")
+            if doc_id is not None and chunk_id is not None:
+                doc_chunk_map.setdefault(doc_id, set()).add(chunk_id)
+
+        for doc_id, chunk_ids in doc_chunk_map.items():
+            for cid in chunk_ids:
+                for offset in range(-neighbor_window, neighbor_window + 1):
+                    if offset == 0:
+                        continue  # already handled above
+                    target = cid + offset
+                    if target < 0:
+                        continue
+                    text = chunk_texts.get((doc_id, target))
+                    if text:
+                        items.append(
+                            {
+                                "document_id": doc_id,
+                                "chunk_id": target,
+                                "context_text": text,
+                                "expanded": True,
+                            }
+                        )
 
         # 3. Deduplicate by (document_id, chunk_id)
         seen: set = set()

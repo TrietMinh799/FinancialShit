@@ -13,7 +13,7 @@ from core.text_utils import clean_text
 
 # lxml is optional but ~5-10x faster for XML/HTML parsing
 try:
-    from lxml import etree as _lxml_etree
+    from lxml import etree as _lxml_etree  # type: ignore[reportAttributeAccessIssue]
     LXML_AVAILABLE = True
 except Exception:
     _lxml_etree = None
@@ -77,9 +77,8 @@ def _html_text(data: str | bytes) -> str:
             return clean_text(doc.text_content())
         except Exception:
             pass
-    if isinstance(data, bytes):
-        data = data.decode("utf-8", errors="ignore")
-    return clean_text(re.sub(r"(?s)<[^>]+>", " ", data))
+    text_str: str = data if isinstance(data, str) else bytes(data).decode("utf-8", errors="ignore")
+    return clean_text(re.sub(r"(?s)<[^>]+>", " ", text_str))
 
 
 # ---------------------------------------------------------------------------
@@ -147,11 +146,17 @@ def _parse_opf_spine(root: Any) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _safe_zip_entry(name: str) -> bool:
+    """Reject zip entry names with path traversal components."""
+    parts = name.replace("\\", "/").split("/")
+    return not any(p in ("..", "") for p in parts)
+
+
 def extract_docx_pages(path: Path) -> list[tuple[int, str]]:
     """Extract text from a DOCX file, returning (page_index, text) pairs."""
     pages: list[tuple[int, str]] = []
     with zipfile.ZipFile(path) as docx:
-        names = set(docx.namelist())
+        names = set(n for n in docx.namelist() if _safe_zip_entry(n))
         docs = [
             n
             for n in names
@@ -181,7 +186,8 @@ def extract_epub_pages(path: Path) -> list[tuple[int, str]]:
     """Extract text from an EPUB file in spine order, returning (page_index, text) pairs."""
     pages: list[tuple[int, str]] = []
     with zipfile.ZipFile(path) as book:
-        names = set(book.namelist())
+        all_names = book.namelist()
+        names = set(n for n in all_names if _safe_zip_entry(n))
 
         # Locate OPF rootfile from container.xml
         rootfile: str | None = None
@@ -193,7 +199,7 @@ def extract_epub_pages(path: Path) -> list[tuple[int, str]]:
                     break
 
         if not rootfile:
-            candidates = [n for n in book.namelist() if n.lower().endswith(".opf")]
+            candidates = [n for n in all_names if n.lower().endswith(".opf") and _safe_zip_entry(n)]
             rootfile = candidates[0] if candidates else None
 
         # Read OPF and resolve spine-ordered HTML docs
@@ -210,8 +216,8 @@ def extract_epub_pages(path: Path) -> list[tuple[int, str]]:
         if not ordered:
             ordered = [
                 n
-                for n in book.namelist()
-                if n.lower().endswith((".html", ".xhtml", ".htm"))
+                for n in all_names
+                if n.lower().endswith((".html", ".xhtml", ".htm")) and _safe_zip_entry(n)
             ]
 
         seen: set[str] = set()
@@ -235,7 +241,7 @@ def extract_pages(path: Path) -> list[tuple[int, str]]:
     suffix = path.suffix.lower()
 
     if suffix == ".pdf":
-        import pdfplumber
+        import pdfplumber  # type: ignore[reportMissingImports]
 
         pages: list[tuple[int, str]] = []
         with pdfplumber.open(str(path)) as pdf:
