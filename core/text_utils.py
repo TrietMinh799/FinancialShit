@@ -40,31 +40,28 @@ def strip_markup(value: str | None) -> str:
 # ---------------------------------------------------------------------------
 
 # Phrases commonly used to hijack an LLM via injected document content.
-_INJECTION_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"ignore\s+(all\s+)?(previous|above|prior|earlier|preceding)\s+(instructions?|prompts?|rules?|context)",
-        r"disregard\s+(all\s+)?(previous|above|prior|earlier|preceding)\s+(instructions?|prompts?|rules?|context)",
-        r"forget\s+(all\s+)?(previous|above|prior|earlier|preceding)\s+(instructions?|prompts?|rules?|context)",
-        r"override\s+(all\s+)?(previous|above|prior|earlier|preceding)\s+(instructions?|prompts?|rules?|context)",
-        r"do\s+not\s+follow\s+(the\s+)?(system|previous|above|prior)\s+(prompt|instructions?|rules?)",
-        r"you\s+are\s+now\s+(a|an)\s+",
-        r"new\s+(instructions?|role|persona|identity)\s*[:.]",
-        r"act\s+as\s+(a|an|if)\s+",
-        r"switch\s+(to|into)\s+(a\s+)?(new\s+)?(role|mode|persona)",
-        r"system\s*:\s*",
-        r"<\s*/?\s*system\s*>",
-        r"<\s*/?\s*retrieved_evidence\s*>",
-        r"<<\s*SYS\s*>>",
-        r"<<\s*/\s*SYS\s*>>",
-        r"\[INST\]",
-        r"\[/INST\]",
-        r"\[SYS\]",
-        r"\[/SYS\]",
-        r"BEGIN\s+(INSTRUCTION|SYSTEM|PROMPT)",
-        r"END\s+(INSTRUCTION|SYSTEM|PROMPT)",
-        r"###\s*(instruction|system|prompt)",
-    )
+_INJECTION_PATTERN: re.Pattern[str] = re.compile(
+    "(?i)"
+    "(?:"
+    "ignore\\s+(?:all\\s+)?(?:previous|above|prior|earlier|preceding)\\s+(?:instructions?|prompts?|rules?|context)|"
+    "disregard\\s+(?:all\\s+)?(?:previous|above|prior|earlier|preceding)\\s+(?:instructions?|prompts?|rules?|context)|"
+    "forget\\s+(?:all\\s+)?(?:previous|above|prior|earlier|preceding)\\s+(?:instructions?|prompts?|rules?|context)|"
+    "override\\s+(?:all\\s+)?(?:previous|above|prior|earlier|preceding)\\s+(?:instructions?|prompts?|rules?|context)|"
+    "do\\s+not\\s+follow\\s+(?:the\\s+)?(?:system|previous|above|prior)\\s+(?:prompt|instructions?|rules?)|"
+    "you\\s+are\\s+now\\s+(?:a|an)\\s+|"
+    "new\\s+(?:instructions?|role|persona|identity)\\s*[:.]|"
+    "act\\s+as\\s+(?:a|an|if)\\s+|"
+    "switch\\s+(?:to|into)\\s+(?:a\\s+)?(?:new\\s+)?(?:role|mode|persona)|"
+    "system\\s*:\\s*|"
+    "<\\s*/?\\s*system\\s*>|"
+    "<\\s*/?\\s*retrieved_evidence\\s*>|"
+    "<<\\s*SYS\\s*>>|<<\\s*/\\s*SYS\\s*>>|"
+    "\\[INST\\]|\\[/INST\\]|"
+    "\\[SYS\\]|\\[/SYS\\]|"
+    "BEGIN\\s+(?:INSTRUCTION|SYSTEM|PROMPT)|"
+    "END\\s+(?:INSTRUCTION|SYSTEM|PROMPT)|"
+    "###\\s*(?:instruction|system|prompt)"
+    ")"
 )
 
 _INJECTION_REPLACEMENT = "[content removed]"
@@ -76,10 +73,6 @@ _INJECTION_REPLACEMENT = "[content removed]"
 
 # Control character removal (except normal whitespace)
 _CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-
-# HTML/XML tag stripping
-_SCRIPT_STYLE_PATTERN = re.compile(r"(?is)<(script|style).*?</\1>")
-_TAG_STRIP_PATTERN = re.compile(r"(?s)<[^>]+>")
 
 # Header splitting patterns
 _HEADER_PATTERN = re.compile(
@@ -142,9 +135,7 @@ def sanitize_injection(text: str) -> str:
     Replaces each matched pattern with a harmless placeholder so the
     surrounding financial content is preserved.
     """
-    for pattern in _INJECTION_PATTERNS:
-        text = pattern.sub(_INJECTION_REPLACEMENT, text)
-    return text
+    return _INJECTION_PATTERN.sub(_INJECTION_REPLACEMENT, text)
 
 
 # Max length for short user-supplied metadata fields (title, company, ticker).
@@ -162,8 +153,7 @@ def sanitize_field(value: str, max_len: int = _FIELD_MAX_LEN) -> str:
     # Remove control chars (except normal whitespace) using precompiled pattern
     value = _CONTROL_CHARS_PATTERN.sub("", value)
     # Strip role/tag markers that could shift the LLM's role perception
-    for pattern in _INJECTION_PATTERNS:
-        value = pattern.sub("", value)
+    value = _INJECTION_PATTERN.sub("", value)
     return value[:max_len].strip()
 
 
@@ -215,15 +205,6 @@ def query_terms(query: str, limit: int = QUERY_TERM_LIMIT) -> list[str]:
 # ---------------------------------------------------------------------------
 # Chunking
 # ---------------------------------------------------------------------------
-
-# Common abbreviation list to avoid false sentence splits
-_ABBREVIATIONS = {
-    "mr.", "mrs.", "ms.", "dr.", "prof.", "sr.", "jr.", "vs.", "etc.", "e.g.", "i.e.",
-    "inc.", "ltd.", "llc.", "corp.", "co.", "u.s.", "u.k.", "e.u.", "p.m.", "a.m.",
-    "no.", "vol.", "ch.", "fig.", "tab.", "sec.", "pp.", "ed.", "trans.", "rev.",
-    "jan.", "feb.", "mar.", "apr.", "jun.", "jul.", "aug.", "sep.", "oct.", "nov.", "dec.",
-    "mon.", "tue.", "wed.", "thu.", "fri.", "sat.", "sun.",
-}
 
 
 def _split_headers(text: str) -> list[str]:

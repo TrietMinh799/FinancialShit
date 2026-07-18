@@ -41,8 +41,8 @@ function renderMarkdown(text) {
   });
 
   // Citation references [N] — convert to styled badges BEFORE block processing
-  // Match [N] where N is 1-3 digits, but not inside a markdown link [text](url)
-  text = text.replace(/(?<!\]\([^)]*)\[(\d{1,3})\](?!\([^)]*\))/g,
+  // Match [N] where N is 1-3 digits, but not inside a markdown link [N](url)
+  text = text.replace(/\[(\d{1,3})\](?!\()/g,
     '<span class="citation-ref">$1</span>');
 
   // Clean up snippet truncation noise: "word ..." → "word…"
@@ -144,6 +144,7 @@ function inlineMd(text) {
 }
 
 let isSending   = false;
+let _abortCtrl  = null;
 let providers   = [];
 let activeProvider = null;
 let conversation = [];            // {role, content} history for LLM context
@@ -319,9 +320,9 @@ async function loadLibrary() {
             <span class="lib-dot lib-dot--${d.source_type === 'book' ? 'book' : 'report'}"></span>
             <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${safe(d.title)} (${typeLabel})">${safe(d.title)}</span>
             <span style="flex-shrink:0;font-size:10.5px;color:var(--text-muted)">${d.page_count}tr · ${d.chunk_count} đoạn</span>
-            <button class="lib-del" onclick="viewChunks(${d.id})" title="Xem các đoạn">⊞</button>
-            <button class="lib-del" onclick="reclassifyBook(${d.id}, '${d.source_type === 'annual_report' ? 'book' : 'annual_report'}')" title="Đổi thành ${toggleLabel}">${toggleIcon}</button>
-            <button class="lib-del" onclick="deleteBook(${d.id})" title="Xóa tài liệu">×</button>
+            <button class="lib-del" data-action="chunks" title="Xem các đoạn">⊞</button>
+            <button class="lib-del" data-action="reclassify" data-target="${d.source_type === 'annual_report' ? 'book' : 'annual_report'}" title="Đổi thành ${toggleLabel}">${toggleIcon}</button>
+            <button class="lib-del" data-action="delete" title="Xóa tài liệu">×</button>
           </div>`;
         }).join('')
       : '<p style="font-size:11.5px;color:var(--text-muted);padding:0 4px">Chưa có tài liệu</p>';
@@ -329,6 +330,19 @@ async function loadLibrary() {
     $('sidebarDocs').innerHTML = `<p style="font-size:11.5px;color:#f87171;padding:0 4px">${safe(e.message)}</p>`;
   }
 }
+
+// Event delegation for library action buttons
+$('sidebarDocs').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  const item = btn.closest('[data-id]');
+  if (!item) return;
+  const id = Number(item.dataset.id);
+  const action = btn.dataset.action;
+  if (action === 'chunks') viewChunks(id);
+  else if (action === 'delete') deleteBook(id);
+  else if (action === 'reclassify') reclassifyBook(id, btn.dataset.target);
+});
 
 async function deleteBook(id) {
   if (!confirm('Xóa tài liệu này?')) return;
@@ -472,12 +486,21 @@ function appendBotHtml(html, sources = []) {
 
 function scrollBottom() {
   const body = $('chatBody');
-  body.scrollTo({top: body.scrollHeight, behavior: 'smooth'});
+  body.scrollTo({top: body.scrollHeight});
 }
 
-  // -- Send question ----------------------------------
+// -- Send question ----------------------------------
 async function sendQuestion(question) {
   if (!question || isSending) return;
+
+  // Cancel any previous in-flight request
+  if (_abortCtrl) _abortCtrl.abort();
+  const abortCtrl = new AbortController();
+  _abortCtrl = abortCtrl;
+
+  isSending = true;
+  updateSendBtn();
+
   conversation.push({role: "user", content: question});
   // Keep last 20 messages to avoid overflowing the LLM context window.
   if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
@@ -509,166 +532,144 @@ async function sendQuestion(question) {
   scrollBottom();
   
   let full_text = '';
+  let lastRenderLen = 0;
+  let renderTimer = null;
   let statusText = 'Đang truy xuất · ' + (activeProvider?.label || '') + '...';
   setStatus(statusText);
-  
-  // Try to use streaming endpoint if supported
-  let useStreaming = false;
-  try {
-    const testRes = new Response();
-    useStreaming = typeof testRes.body?.getReader === 'function';
-  } catch (e) {
-    useStreaming = false;
+
+  function scheduleRender() {
+    if (renderTimer) return;
+    renderTimer = setTimeout(() => {
+      renderTimer = null;
+      // Only render new text since last render
+      if (full_text.length > lastRenderLen) {
+        bub.innerHTML = renderMarkdown(full_text);
+        lastRenderLen = full_text.length;
+      }
+    }, 80);
+  }
+  function flushRender() {
+    if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
+    if (full_text.length > lastRenderLen) {
+      bub.innerHTML = renderMarkdown(full_text);
+      lastRenderLen = full_text.length;
+    }
   }
   
   try {
-    if (useStreaming) {
-      const res = await fetch('/api/ask/stream', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          question,
-          messages: conversation.slice(0, -1),
-          api_key:  apiKey(),
-          model:    apiModel(),
-          base_url: baseUrl(),
-        })
-      });
-      
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // Try streaming endpoint
+    const res = await fetch('/api/ask/stream', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        question,
+        messages: conversation.slice(0, -1),
+        api_key:  apiKey(),
+        model:    apiModel(),
+        base_url: baseUrl(),
+      }),
+      signal: abortCtrl.signal,
+    });
+    
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-      if (!res.body) {
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-        if (data.answer) {
-          full_text = data.answer;
-          bub.innerHTML = renderMarkdown(full_text);
-          meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '') + ` · ${full_text.length} ký tự`;
-          if (data.citations?.length) {
-            const src = document.createElement('div');
-            src.className = 'message-sources';
-            data.citations.forEach(c => {
-              const t = document.createElement('span');
-              t.className = 'source-tag';
-              t.textContent = c.title || 'Nguồn';
-              src.appendChild(t);
-            });
-            cont.appendChild(src);
-          }
-          setStatus('Done');
+    if (!res.body) {
+      const data = await res.json();
+      if (data.error) throw new Error(data.error);
+      if (data.answer) {
+        full_text = data.answer;
+        bub.innerHTML = renderMarkdown(full_text);
+        meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '') + ` · ${full_text.length} ký tự`;
+        if (data.citations?.length) {
+          const src = document.createElement('div');
+          src.className = 'message-sources';
+          data.citations.forEach(c => {
+            const t = document.createElement('span');
+            t.className = 'source-tag';
+            t.textContent = c.title || 'Nguồn';
+            src.appendChild(t);
+          });
+          cont.appendChild(src);
         }
-        conversation.push({role: "assistant", content: full_text});
-        if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
-      } else {
-        let reader;
-        try {
-          reader = res.body.getReader();
-        } catch {
-          const data = await res.json();
-          if (data.error) throw new Error(data.error);
-          if (data.answer) full_text = data.answer;
-          bub.innerHTML = renderMarkdown(full_text);
-          meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '') + ` · ${full_text.length} ký tự`;
-          conversation.push({role: "assistant", content: full_text});
-          if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
-          return;
-        }
-        const decoder = new TextDecoder();
-        let sseBuffer = '';
-        while (true) {
-          const {done, value} = await reader.read();
-          if (done) break;
-          sseBuffer += decoder.decode(value, {stream: true});
-          const lines = sseBuffer.split('\n');
-          // Keep the last (possibly incomplete) line in the buffer
-          sseBuffer = lines.pop() || '';
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = JSON.parse(line.slice(6));
-              if (data.status) {
-                setStatus(data.status);
-              } else if (data.token) {
-                full_text += data.token;
-                if (!bub._rt) {
-                  bub._rt = requestAnimationFrame(() => {
-                    bub.innerHTML = renderMarkdown(full_text);
-                    bub._rt = null;
-                  });
-                }
-                meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
-              } else if (data.done) {
-                if (bub._rt) { cancelAnimationFrame(bub._rt); bub._rt = null; }
-                bub.innerHTML = renderMarkdown(full_text);
-                const sources = (data.citations || []).map(c => c.title || 'Nguồn');
-                const cnt = full_text.length;
-                meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '') + ` · ${cnt} ký tự`;
-                if (sources.length) {
-                  const src = document.createElement('div');
-                  src.className = 'message-sources';
-                  sources.forEach(s => {
-                    const t = document.createElement('span');
-                    t.className = 'source-tag';
-                    t.textContent = s;
-                    src.appendChild(t);
-                  });
-                  cont.appendChild(src);
-                }
-                if (activeProvider) {
-                  setStatus(data.mode === 'llm' ? 'Câu trả lời LLM xong' : 'Câu trả lời bằng chứng xong');
-                }
-                conversation.push({role: "assistant", content: full_text});
-                if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
-                break;
-              } else if (data.error) {
-                throw new Error(data.error);
-              }
-            }
-          }
-        }
+        setStatus('Done');
       }
-    } else {
-      // Fallback to non-streaming endpoint for older browsers
-      const result = await fetch('/api/ask', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-          question,
-          messages: conversation.slice(0, -1),
-          api_key:  apiKey(),
-          model:    apiModel(),
-          base_url: baseUrl(),
-        })
-      }).then(readJson);
-
-      full_text = result.answer;
-      bub.innerHTML = renderMarkdown(full_text);
-      const sources = (result.citations || []).map(c => c.title || 'Nguồn');
-      if (sources.length) {
-        const src = document.createElement('div');
-        src.className = 'message-sources';
-        sources.forEach(s => {
-          const t = document.createElement('span');
-          t.className = 'source-tag';
-          t.textContent = s;
-          src.appendChild(t);
-        });
-        cont.appendChild(src);
-      }
-      meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '') + ` · ${full_text.length} ký tự`;
-      setStatus(result.mode === 'llm' ? 'Câu trả lời LLM xong' : 'Câu trả lời bằng chứng xong');
       conversation.push({role: "assistant", content: full_text});
       if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
+    } else {
+      let reader;
+      try {
+        reader = res.body.getReader();
+      } catch {
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        if (data.answer) full_text = data.answer;
+        bub.innerHTML = renderMarkdown(full_text);
+        meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '') + ` · ${full_text.length} ký tự`;
+        conversation.push({role: "assistant", content: full_text});
+        if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
+        return;
+      }
+      const decoder = new TextDecoder();
+      let partial = '';  // holds an incomplete line from previous chunk
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        const text = partial + decoder.decode(value, {stream: true});
+        const lastNewline = text.lastIndexOf('\n');
+        if (lastNewline === -1) { partial = text; continue; }
+        partial = text.slice(lastNewline + 1);
+        for (const line of text.slice(0, lastNewline).split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          const data = JSON.parse(line.slice(6));
+          if (data.status) {
+            setStatus(data.status);
+          } else if (data.token) {
+            full_text += data.token;
+            scheduleRender();
+            meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
+          } else if (data.done) {
+            flushRender();
+            const sources = (data.citations || []).map(c => c.title || 'Nguồn');
+            const cnt = full_text.length;
+            meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '') + ` · ${cnt} ký tự`;
+            if (sources.length) {
+              const src = document.createElement('div');
+              src.className = 'message-sources';
+              sources.forEach(s => {
+                const t = document.createElement('span');
+                t.className = 'source-tag';
+                t.textContent = s;
+                src.appendChild(t);
+              });
+              cont.appendChild(src);
+            }
+            if (activeProvider) {
+              setStatus(data.mode === 'llm' ? 'Câu trả lời LLM xong' : 'Câu trả lời bằng chứng xong');
+            }
+            conversation.push({role: "assistant", content: full_text});
+            if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
+            return;
+          } else if (data.error) {
+            throw new Error(data.error);
+          }
+        }
+      }
+      // Flush any remaining text
+      flushRender();
     }
   } catch(err) {
+    if (err.name === 'AbortError') return;
     botMsg.classList.add('error');
     bub.textContent = 'Lỗi: ' + err.message;
     meta.textContent = '';
     conversation.push({role: "assistant", content: "Lỗi: " + err.message});
     if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
     setStatus('Lỗi');
+  } finally {
+    isSending = false;
+    _abortCtrl = null;
+    updateSendBtn();
   }
-
-  isSending = false; updateSendBtn();
 }
 
 // -- Upload book ------------------------------------
