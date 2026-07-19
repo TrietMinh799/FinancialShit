@@ -11,6 +11,7 @@ from typing import Any
 from pypdf import PdfReader
 
 from core.text_utils import clean_text
+import contextlib
 
 # lxml is optional but ~5-10x faster for XML/HTML parsing
 try:
@@ -353,17 +354,13 @@ def extract_pages(path: Path) -> Iterator[tuple[int, str]]:
                 # Per-page pypdf fallback when pdfplumber gets no text
                 if not text:
                     if pypdf_reader is None:
-                        try:
+                        with contextlib.suppress(Exception):
                             pypdf_reader = PdfReader(str(path))
-                        except Exception:
-                            pass
                     if pypdf_reader is not None:
-                        try:
+                        with contextlib.suppress(Exception):
                             text = clean_text(
                                 pypdf_reader.pages[index - 1].extract_text() or ""
                             )
-                        except Exception:
-                            pass
 
                 # Extract tables as markdown and append to text
                 try:
@@ -404,7 +401,7 @@ def extract_pages(path: Path) -> Iterator[tuple[int, str]]:
         if not had_any_page:
             raise ValueError(
                 "No readable text was found in this PDF. "
-                "If it is scanned, install Tesseract OCR (https://github.com/tesseract-ocr/tesseract) "
+                "If it is scanned, install Tesseract OCR (https://github.com/tesseract-ocr/tesseract)"
                 "and ensure it is on your PATH, then try again."
             )
         return
