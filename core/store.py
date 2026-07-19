@@ -11,12 +11,20 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
-
-from core.config import DB_PATH, RECENT_DOCS_LIMIT, REPORT_CHUNK_CHARS, REPORT_CHUNK_OVERLAP, UPLOAD_DIR
+from core.config import (
+    DB_PATH,
+    RECENT_DOCS_LIMIT,
+    REPORT_CHUNK_CHARS,
+    REPORT_CHUNK_OVERLAP,
+    UPLOAD_DIR,
+)
 from core.extractors import extract_pages
 from core.text_utils import chunk_pages, query_terms, sanitize_injection, snippet_for
 from core.vector_store import VectorStore
+
+logger = logging.getLogger(__name__)
+
+
 
 # ---------------------------------------------------------------------------
 # Filename / hashing helpers
@@ -401,7 +409,6 @@ class Store:
             for row in rows
         ]
         if chunks:
-            chunk_chars = REPORT_CHUNK_CHARS if new_source_type == "annual_report" else None
             self.vector_store().index_chunks(
                 document_id, doc["title"], new_source_type, chunks,
             )

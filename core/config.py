@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """config.py - Global configuration, paths, constants, and domain vocabularies."""
 
 from __future__ import annotations

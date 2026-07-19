@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import re
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 from pypdf import PdfReader
 
 from core.text_utils import clean_text
-import contextlib
 
 # lxml is optional but ~5-10x faster for XML/HTML parsing
 try:
@@ -142,7 +142,7 @@ def _parse_opf_spine(root: Any) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _table_to_markdown(rows: list[list[str]]) -> str:
+def _table_to_markdown(rows: Sequence[Sequence[str | None]]) -> str:
     """Convert a table (list of rows of cell strings) to a markdown table.
 
     Returns an empty string when the table has no usable content.
@@ -299,7 +299,7 @@ def _ocr_page(page: Any) -> str:
     if not _OCR_AVAILABLE or not _PIL_AVAILABLE:
         return ""
     try:
-        import subprocess, sys
+        import subprocess
 
         subprocess.run(
             ["tesseract", "--version"],
@@ -311,7 +311,7 @@ def _ocr_page(page: Any) -> str:
     try:
         img = page.to_image(resolution=250)
         pil_image = img.original.convert("L")
-        text = _pytesseract.image_to_string(pil_image)
+        text = _pytesseract.image_to_string(pil_image)  # type: ignore[union-attr]
         return clean_text(text or "")
     except Exception:
         return ""

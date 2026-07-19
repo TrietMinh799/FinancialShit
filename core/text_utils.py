@@ -17,7 +17,6 @@ from core.config import (
     STOPWORDS,
 )
 
-
 # Module-level compiled patterns for basic cleaning
 _WHITESPACE_PATTERN = re.compile(r"\s+")
 _SCRIPT_STYLE_PATTERN = re.compile(r"(?is)<(script|style).*?</\1>")

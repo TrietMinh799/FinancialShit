@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from typing import Any
@@ -232,10 +233,8 @@ class VectorStore:
         if self._client is None:
             return
         for coll in self._client.list_collections():
-            try:
+            with contextlib.suppress(Exception):
                 self._client.delete_collection(coll.name)
-            except Exception:
-                pass
         self._collections.clear()
         _search_cache.invalidate()
 

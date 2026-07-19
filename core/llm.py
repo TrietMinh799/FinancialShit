@@ -431,15 +431,14 @@ def call_openai_llm_stream(
             return
         except HTTPError as exc:
             status = exc.code
-            if status == 429 or status >= 500:
-                if attempt < LLM_MAX_RETRIES:
-                    backoff = 1.0 * (2 ** attempt)
-                    logging.getLogger(__name__).warning(
-                        "LLM stream HTTP %d (attempt %d/%d), retrying in %.0fs…",
-                        status, attempt + 1, LLM_MAX_RETRIES + 1, backoff,
-                    )
-                    time.sleep(backoff)
-                    continue
+            if (status == 429 or status >= 500) and attempt < LLM_MAX_RETRIES:
+                backoff = 1.0 * (2 ** attempt)
+                logging.getLogger(__name__).warning(
+                    "LLM stream HTTP %d (attempt %d/%d), retrying in %.0fs…",
+                    status, attempt + 1, LLM_MAX_RETRIES + 1, backoff,
+                )
+                time.sleep(backoff)
+                continue
             # Retries exhausted — fall back to a basic-tone LLM answer (no tone styling)
             for chunk in call_openai_llm_stream(
                 question, citations, api_key, model, base_url, history=history, tone="basic"
@@ -522,11 +521,11 @@ def call_openai_llm(
     messages: list[dict] = [{"role": "system", "content": system_content}]
     if history:
         messages.extend(history)
-        
+
     final_question = question
     if tone == "expert":
         final_question = _build_expert_preamble() + final_question
-        
+
     messages.append(
         {
             "role": "user",
