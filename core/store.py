@@ -161,14 +161,16 @@ class Store:
         If the identical file (by SHA-256) is already indexed, the existing
         record is returned with ``inserted=False``.
         """
-        pages = extract_pages(path)
+        pages = list(extract_pages(path))
         if not pages:
             raise ValueError("No readable text was found in this file.")
         # Reports are dense; smaller chunks improve retrieval precision.
         if source_type == "annual_report":
-            chunks = chunk_pages(pages, chunk_chars=REPORT_CHUNK_CHARS, overlap=REPORT_CHUNK_OVERLAP)
+            chunks = list(
+                chunk_pages(pages, chunk_chars=REPORT_CHUNK_CHARS, overlap=REPORT_CHUNK_OVERLAP)
+            )
         else:
-            chunks = chunk_pages(pages)
+            chunks = list(chunk_pages(pages))
         if not chunks:
             raise ValueError("No usable chunks were created from this file.")
 
@@ -196,21 +198,25 @@ class Store:
                         "WHERE c.document_id = ? ORDER BY c.chunk_index",
                         (existing["id"],),
                     ).fetchall()
-                    if rows:
-                        self.vector_store().delete_document(existing["id"])
-                        re_chunks = [
-                            {"text": r["text"], "page_start": r["page_start"], "page_end": r["page_end"]}
-                            for r in rows
-                        ]
-                        self.vector_store().index_chunks(
-                            existing["id"], rows[0]["title"], source_type, re_chunks
-                        )
-                        self.vector_store().invalidate_search_cache()
+                else:
+                    rows = []
 
                 chunk_count = conn.execute(
                     "SELECT COUNT(*) FROM chunks WHERE document_id = ?",
                     (existing["id"],),
                 ).fetchone()[0]
+
+                if existing["source_type"] != source_type and rows:
+                    self.vector_store().delete_document(existing["id"])
+                    re_chunks = [
+                        {"text": r["text"], "page_start": r["page_start"], "page_end": r["page_end"]}
+                        for r in rows
+                    ]
+                    self.vector_store().index_chunks(
+                        existing["id"], rows[0]["title"], source_type, re_chunks
+                    )
+                    self.vector_store().invalidate_search_cache()
+
                 return {
                     "document_id": existing["id"],
                     "title": existing["title"],
@@ -253,28 +259,29 @@ class Store:
 
             # FTS5 is kept in sync by triggers (chunks_ai/chunks_ad/chunks_au)
 
-            # Index into ChromaDB for vector search (with sanitised text)
-            sanitised_chunks = [{**ch, "text": sanitised_texts[i]} for i, ch in enumerate(chunks)]
-            source_type_str = source_type or "book"
-            try:
-                self.vector_store().index_chunks(
-                    doc_id,
-                    title or path.stem,
-                    source_type_str,
-                    sanitised_chunks,
-                )
-            except Exception as exc:
-                logger.error("ChromaDB indexing failed for doc %s (%s): %s", doc_id, title, exc)
+        # Outside the with block
+        # Index into ChromaDB for vector search (with sanitised text)
+        sanitised_chunks = [{**ch, "text": sanitised_texts[i]} for i, ch in enumerate(chunks)]
+        source_type_str = source_type or "book"
+        try:
+            self.vector_store().index_chunks(
+                doc_id,
+                title or path.stem,
+                source_type_str,
+                sanitised_chunks,
+            )
+        except Exception as exc:
+            logger.error("ChromaDB indexing failed for doc %s (%s): %s", doc_id, title, exc)
 
-            return {
-                "document_id": doc_id,
-                "title": title or path.stem,
-                "source_type": source_type,
-                "char_count": char_count,
-                "page_count": len(pages),
-                "chunk_count": len(chunks),
-                "inserted": True,
-            }
+        return {
+            "document_id": doc_id,
+            "title": title or path.stem,
+            "source_type": source_type,
+            "char_count": char_count,
+            "page_count": len(pages),
+            "chunk_count": len(chunks),
+            "inserted": True,
+        }
 
     def stats(self) -> dict:
         """Return library-level statistics and the 12 most recent documents."""
@@ -343,9 +350,9 @@ class Store:
             if not doc:
                 raise ValueError(f"Document {document_id} not found.")
 
-            self.vector_store().delete_document(document_id)
-
             conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
+
+        self.vector_store().delete_document(document_id)
 
         fpath = UPLOAD_DIR / doc["filename"]
         # Guard against path traversal: the resolved path must stay within UPLOAD_DIR

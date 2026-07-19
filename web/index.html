@@ -500,6 +500,16 @@
         </button>
       </div>
 
+      <!-- New chat -->
+      <div style="padding:14px 14px 0">
+        <button class="new-chat-btn" id="newChatBtn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          Cuộc Trò Chuyện Mới
+        </button>
+      </div>
+
       <!-- LLM Provider -->
       <div style="padding:14px 14px 0">
         <div class="sidebar-section-title" style="margin-bottom:10px">
@@ -571,6 +581,8 @@
 
     <!-- ── MAIN CHAT ── -->
     <main class="chat-main">
+      <!-- Streaming progress bar -->
+      <div class="progress-track" id="progressTrack"><div class="progress-bar"></div></div>
       <!-- Header -->
       <header class="chat-header">
         <button class="menu-btn" id="menuBtn" aria-label="Mở menu">
@@ -659,6 +671,13 @@
       <!-- Typing anchor -->
       <div id="typingAnchor" style="padding:0 20px;max-width:820px;margin:0 auto;width:100%"></div>
 
+      <!-- Scroll to bottom FAB -->
+      <button class="scroll-bottom-btn" id="scrollBottomBtn" aria-label="Cuộn xuống">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>
+        </svg>
+      </button>
+
       <!-- Input -->
       <div class="chat-input-area">
         <div class="input-wrapper">
@@ -675,8 +694,14 @@
                 <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
               </svg>
             </button>
+            <button class="stop-btn" id="stopButton" type="button" aria-label="Dừng">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="6" y="6" width="12" height="12" rx="2" ry="2"/>
+              </svg>
+            </button>
           </div>
           <p class="input-hint">Nhấn <kbd>Enter</kbd> để gửi · <kbd>Shift+Enter</kbd> để xuống dòng</p>
+          <div class="thinking-status" id="thinkingStatus"><span class="dot"></span><span id="thinkingText">Đang suy nghĩ…</span></div>
         </div>
       </div>
     </main>
@@ -756,6 +781,15 @@
           <option value="">-- chọn mô hình --</option>
         </select>
         <input id="settingsModelCustom" class="field-input" placeholder="Hoặc nhập tên mô hình…" style="padding:7px 10px;font-size:12.5px;margin-top:6px;display:none" />
+      </div>
+
+      <div style="margin-bottom:8px">
+        <label class="field-label" style="margin-bottom:4px">Phong cách trả lời (Tone)</label>
+        <select id="settingsToneSelect" class="model-select">
+          <option value="basic">🟢 Cơ bản — Chỉ dựa trên tài liệu</option>
+          <option value="professional">🔵 Chuyên nghiệp — Phân tích có cấu trúc</option>
+          <option value="expert">🟣 Chuyên gia — Kết hợp phân tích chuyên sâu</option>
+        </select>
       </div>
 
       <label class="field-label" style="margin-bottom:4px">API Key</label>

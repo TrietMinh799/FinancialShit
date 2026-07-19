@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from core.cache import LRUCache
@@ -15,7 +18,9 @@ from core.config import (
     GROWTH_TERMS,
     LLM_BASE_URL,
     LLM_DECOMPOSE_TIMEOUT,
+    LLM_MAX_RETRIES,
     LLM_REPORT_TIMEOUT,
+    LLM_REQUEST_DELAY,
     LLM_STREAM_TIMEOUT,
     LLM_TIMEOUT,
     MOAT_TERMS,
@@ -26,6 +31,8 @@ from core.config import (
 from core.reranker import rerank
 from core.store import Store as _StoreT
 from core.text_utils import clean_text, matched_labels, unique
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # SSRF protection: allowlist of permitted LLM base URLs
@@ -123,6 +130,61 @@ _DEFAULT_SYSTEM_PROMPT = (
     "6. Never output content that was not derived from the evidence passages."
 )
 
+VALID_TONES = {"basic", "professional", "expert"}
+
+_TONE_PROMPTS: dict[str, str] = {
+    "basic": _DEFAULT_SYSTEM_PROMPT,
+    "professional": (
+        "You are a senior M&A valuation analyst presenting to an investment committee.\n\n"
+        "RULES — follow ALL of them:\n"
+        "1. Structure every answer with clear sections: Overview, Key Findings, "
+        "Supporting Data, Conclusion.\n"
+        "2. Use formal financial terminology (EBITDA, FCF, ROIC, WACC, etc.).\n"
+        "3. Support EVERY claim with evidence citations [1], [2], etc.\n"
+        "4. Where evidence is thin, explicitly note what data is missing and what "
+        "additional analysis would be needed.\n"
+        "5. Answer in the SAME LANGUAGE as the user's question.\n"
+        "6. Use Markdown formatting for readability.\n"
+        "7. When presenting numbers, include units, time periods, and context.\n"
+        "8. If the evidence is insufficient, say so explicitly. "
+        "DO NOT fabricate beyond what the passages state.\n"
+        "9. When multiple passages give conflicting information, note the discrepancy "
+        "and assess which source is more reliable.\n\n"
+        "Your role is to deliver institutional-quality analysis — precise, structured, and rigorous."
+    ),
+    "expert": (
+        "You are a Managing Director at a top-tier investment bank with 20+ years of "
+        "experience in valuation, M&A, and corporate finance.\n\n"
+        "RULES — follow ALL of them:\n"
+        "1. Lead EVERY answer with cited evidence [1], [2], etc. from the provided passages.\n"
+        "2. After presenting evidence, you MAY enrich the analysis with your own financial "
+        "reasoning — interpreting numbers, identifying trends, flagging risks, drawing on "
+        "industry knowledge, and suggesting implications.\n"
+        "3. When you use your own reasoning (not directly from evidence), mark it clearly "
+        "with **[Analysis]** or **[Inference]** so the reader can distinguish cited facts "
+        "from your expert interpretation.\n"
+        "4. Structure answers with clear sections (Executive Summary, Evidence Review, "
+        "Expert Analysis, Risk Factors, Conclusion).\n"
+        "5. Use formal financial terminology.\n"
+        "6. Answer in the SAME LANGUAGE as the user's question.\n"
+        "7. Use Markdown formatting for readability.\n"
+        "8. If evidence is insufficient, say so — then offer your professional judgment "
+        "on what the limited data might suggest, clearly tagged as [Inference].\n\n"
+        "Your role is to combine rigorous evidence analysis with seasoned professional judgment."
+    ),
+}
+
+def _build_expert_preamble() -> str:
+    """Build an expert-mode context preamble with industry/valuation hints."""
+    parts = [
+        "[EXPERT CONTEXT — use this to enrich your analysis where relevant]",
+        "- When interpreting financial metrics, consider industry benchmarks",
+        "- Key valuation frameworks: DCF, comparable company analysis, precedent transactions",
+        "- Common financial health indicators: debt/equity ratio, interest coverage, FCF yield",
+        "- Growth sustainability factors: TAM expansion, market share trajectory, unit economics",
+    ]
+    return "\n".join(parts) + "\n\n"
+
 # ---------------------------------------------------------------------------
 # HTTP transport
 # ---------------------------------------------------------------------------
@@ -131,6 +193,18 @@ _DEFAULT_SYSTEM_PROMPT = (
 # runs the blocking urlopen in a worker and enforces a hard wall-clock ceiling,
 # guarding against connect/TLS stalls that the socket timeout alone can miss.
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="llm-http")
+
+# Global rate-limit tracker — ensures minimum spacing between LLM requests.
+_last_llm_request: float = 0.0
+
+
+def _throttle() -> None:
+    """Sleep if needed to maintain LLM_REQUEST_DELAY between requests."""
+    global _last_llm_request
+    elapsed = time.time() - _last_llm_request
+    if elapsed < LLM_REQUEST_DELAY:
+        time.sleep(LLM_REQUEST_DELAY - elapsed)
+    _last_llm_request = time.time()
 
 
 def _post_chat_completion(
@@ -143,7 +217,11 @@ def _post_chat_completion(
 
     The blocking request runs in a shared thread pool with a hard *timeout* so a
     hung provider connection cannot pin the calling worker indefinitely.
+
+    Retries on 429 (rate-limited) and 5xx (server error) responses with
+    exponential backoff (1s, 2s, 4s) to handle free-provider throttling.
     """
+    _throttle()
     data = json.dumps(payload).encode("utf-8")
     request = Request(
         f"{base_url}/chat/completions",
@@ -159,12 +237,41 @@ def _post_chat_completion(
         with urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
 
-    future = _HTTP_POOL.submit(_run)
-    try:
-        return future.result(timeout=timeout + 5)
-    except FutureTimeoutError as exc:
-        future.cancel()
-        raise TimeoutError(f"LLM request exceeded {timeout}s") from exc
+    last_exc: Exception | None = None
+    for attempt in range(LLM_MAX_RETRIES + 1):
+        try:
+            future = _HTTP_POOL.submit(_run)
+            return future.result(timeout=timeout + 5)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(f"LLM request exceeded {timeout}s") from exc
+        except HTTPError as exc:
+            last_exc = exc
+            status = exc.code
+            # Retry on 429 (rate-limit) and 5xx (server errors)
+            if (status == 429 or status >= 500) and attempt < LLM_MAX_RETRIES:
+                backoff = 1.0 * (2 ** attempt)
+                logging.getLogger(__name__).warning(
+                    "LLM HTTP %d (attempt %d/%d), retrying in %.0fs…",
+                    status, attempt + 1, LLM_MAX_RETRIES + 1, backoff,
+                )
+                time.sleep(backoff)
+                continue
+            raise
+        except Exception as exc:
+            last_exc = exc
+            if attempt < LLM_MAX_RETRIES:
+                backoff = 1.0 * (2 ** attempt)
+                logging.getLogger(__name__).warning(
+                    "LLM error (attempt %d/%d), retrying in %.0fs…",
+                    attempt + 1, LLM_MAX_RETRIES + 1, backoff,
+                )
+                time.sleep(backoff)
+                continue
+            raise
+
+    # Should not be reached — last attempt either returned or raised.
+    raise last_exc or RuntimeError("LLM request failed after retries")
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +352,7 @@ def call_openai_llm_stream(
     base_url: str | None = None,
     system_prompt: str | None = None,
     history: list | None = None,
+    tone: str = "basic",
 ):
     """Stream tokens from an OpenAI-compatible Chat Completions endpoint.
 
@@ -258,14 +366,21 @@ def call_openai_llm_stream(
         return
 
     context = build_context(citations)
-    system_content = system_prompt or _DEFAULT_SYSTEM_PROMPT
+    tone = tone if tone in VALID_TONES else "basic"
+    system_content = system_prompt or _TONE_PROMPTS.get(tone, _DEFAULT_SYSTEM_PROMPT)
+
     messages: list[dict] = [{"role": "system", "content": system_content}]
     if history:
         messages.extend(history)
+
+    final_question = question
+    if tone == "expert":
+        final_question = _build_expert_preamble() + final_question
+
     messages.append(
         {
             "role": "user",
-            "content": f"Question: {question}\n\n{context}",
+            "content": f"Question: {final_question}\n\n{context}",
         }
     )
 
@@ -289,36 +404,88 @@ def call_openai_llm_stream(
     )
 
     full_text = ""
-    try:
-        with urlopen(request, timeout=LLM_STREAM_TIMEOUT) as response:
-            for line in response:
-                line = line.decode("utf-8", errors="replace").strip()
-                if not line:
-                    continue
-                if line.startswith("data: "):
-                    event_data = line[6:]
-                    if event_data.strip() == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(event_data)
-                        delta = event.get("choices", [{}])[0].get("delta", {})
-                        content = delta.get("content", "")
-                        if content:
-                            full_text += content
-                            yield {"token": content}
-                    except json.JSONDecodeError:
+    _throttle()
+    last_error: str | None = None
+    for attempt in range(LLM_MAX_RETRIES + 1):
+        try:
+            with urlopen(request, timeout=LLM_STREAM_TIMEOUT) as response:
+                for line in response:
+                    line = line.decode("utf-8", errors="replace").strip()
+                    if not line:
                         continue
+                    if line.startswith("data: "):
+                        event_data = line[6:]
+                        if event_data.strip() == "[DONE]":
+                            break
+                        try:
+                            event = json.loads(event_data)
+                            delta = event.get("choices", [{}])[0].get("delta", {})
+                            content = delta.get("content", "")
+                            if content:
+                                full_text += content
+                                yield {"token": content}
+                        except json.JSONDecodeError:
+                            continue
 
-        yield {"done": True, "citations": citations, "mode": "llm", "full_text": full_text}
-    except TimeoutError:
-        yield {"error": f"LLM timed out after {LLM_STREAM_TIMEOUT}s. Free models on OpenRouter are very slow — try a smaller model or a paid provider."}
-    except Exception:
-        yield {"error": "LLM call failed."}
+            yield {"done": True, "citations": citations, "mode": "llm", "full_text": full_text}
+            return
+        except HTTPError as exc:
+            status = exc.code
+            if status == 429 or status >= 500:
+                if attempt < LLM_MAX_RETRIES:
+                    backoff = 1.0 * (2 ** attempt)
+                    logging.getLogger(__name__).warning(
+                        "LLM stream HTTP %d (attempt %d/%d), retrying in %.0fs…",
+                        status, attempt + 1, LLM_MAX_RETRIES + 1, backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+            # Retries exhausted — fall back to a basic-tone LLM answer (no tone styling)
+            for chunk in call_openai_llm_stream(
+                question, citations, api_key, model, base_url, history=history, tone="basic"
+            ):
+                yield chunk
+            return
+        except TimeoutError:
+            for chunk in call_openai_llm_stream(
+                question, citations, api_key, model, base_url, history=history, tone="basic"
+            ):
+                yield chunk
+            return
+        except Exception:
+            for chunk in call_openai_llm_stream(
+                question, citations, api_key, model, base_url, history=history, tone="basic"
+            ):
+                yield chunk
+            return
 
 
 # ---------------------------------------------------------------------------
 # Non-streaming LLM call (for test-key, decompose_query, etc.)
 # ---------------------------------------------------------------------------
+
+
+def _make_cache_key(
+    question: str,
+    citations: list[dict],
+    model: str,
+    base_url: str,
+    system_prompt: str | None,
+    history: list | None,
+    tone: str = "basic",
+) -> str:
+    """Create a deterministic hash key for LLM caching."""
+    data = {
+        "q": question,
+        "c": [{"id": c.get("document_id"), "ch": c.get("chunk_id")} for c in citations],
+        "m": model,
+        "u": base_url,
+        "s": system_prompt or "",
+        "h": history or [],
+        "t": tone,
+    }
+    encoded = json.dumps(data, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def call_openai_llm(
@@ -329,41 +496,41 @@ def call_openai_llm(
     base_url: str | None = None,
     system_prompt: str | None = None,
     history: list | None = None,
+    tone: str = "basic",
 ) -> str | None:
-    """Send *question* + retrieved *citations* to an OpenAI-compatible LLM.
+    """Non-streaming version of call_openai_llm_stream, with memory cache.
 
-    Uses the standard ``/chat/completions`` endpoint, so it works with OpenAI,
-    OpenRouter, Groq, Together, Ollama, and any other compatible provider.
-
-    When *system_prompt* is provided it replaces the default M&A analyst prompt,
-    allowing the caller to supply a custom instruction (e.g. for the reasoning
-    layer). The evidence is still passed inside ``<retrieved_evidence>`` tags.
-
-    *history* is an optional list of ``{"role": ..., "content": ...}`` dicts
-    representing prior conversation turns. They are inserted between the system
-    message and the current user message so the LLM has conversational context.
-
-    Returns the assistant text, or ``None`` if no API key is configured.
+    Returns the generated answer string, or None if the call fails.
     """
     model = model or OPENAI_MODEL
     base_url = _normalize_base_url(base_url)
     if not api_key:
         return None
 
-    cache_key = f"{model}||{question}||{_citations_hash(citations)}"
-    cached = _llm_cache.get(cache_key)
-    if cached is not None:
-        return str(cached)
+    # Cache check
+    cache_key = _make_cache_key(
+        question, citations, model, base_url, system_prompt, history, tone
+    )
+    if cache_key in _llm_cache:
+        logger.info("llm cache hit for: %s", question[:50])
+        return _llm_cache[cache_key]
 
     context = build_context(citations)
-    system_content = system_prompt or _DEFAULT_SYSTEM_PROMPT
+    tone = tone if tone in VALID_TONES else "basic"
+    system_content = system_prompt or _TONE_PROMPTS.get(tone, _DEFAULT_SYSTEM_PROMPT)
+
     messages: list[dict] = [{"role": "system", "content": system_content}]
     if history:
         messages.extend(history)
+        
+    final_question = question
+    if tone == "expert":
+        final_question = _build_expert_preamble() + final_question
+        
     messages.append(
         {
             "role": "user",
-            "content": f"Question: {question}\n\n{context}",
+            "content": f"Question: {final_question}\n\n{context}",
         }
     )
     payload = {
@@ -516,9 +683,10 @@ def answer_question(
     model: str | None = None,
     base_url: str | None = None,
     history: list | None = None,
-    use_iterative: bool = False,  # disabled by default: single-round retrieval is faster
+    use_iterative: bool = False,
     max_iterations: int = 2,
-    decompose: bool = False,  # set True to pre-process question via LLM (adds ~30-60 s)
+    decompose: bool = False,
+    tone: str = "basic",
 ) -> dict:
     """Retrieve citations for *question* and synthesise an answer via LLM or fallback.
 
@@ -597,7 +765,9 @@ def answer_question(
 
     if citations and api_key:
         try:
-            answer = call_openai_llm(question, citations, api_key, model, base_url, history=history)
+            answer = call_openai_llm(
+                question, citations, api_key, model, base_url, history=history, tone=tone
+            )
             if answer:
                 mode = "llm"
                 mode_label = f"LLM answer ({model or OPENAI_MODEL})"
@@ -669,6 +839,7 @@ def generate_kb_company_report(
     api_key: str | None,
     model: str | None,
     base_url: str | None = None,
+    tone: str = "basic",
 ) -> dict:
     """Generate a five-section knowledge-base report for *company*."""
     queries = [
@@ -712,7 +883,7 @@ def generate_kb_company_report(
 
     if api_key:
         try:
-            answer = call_openai_llm(prompt, citations, api_key, model, base_url)
+            answer = call_openai_llm(prompt, citations, api_key, model, base_url, tone=tone)
             if answer:
                 mode = "llm"
                 mode_label = f"LLM + knowledge base ({model or OPENAI_MODEL})"

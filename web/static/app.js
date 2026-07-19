@@ -164,12 +164,15 @@ function apiModel() {
   return sel || ($('settingsModelCustom')?.value || '').trim() || '';
 }
 
+function tone() { return ($('settingsToneSelect')?.value || 'basic').trim(); }
+
 // -- Persist / restore settings ---------------------
 function loadSettings() {
   const pid   = localStorage.getItem('rag_provider_id') || 'openai';
   const key   = localStorage.getItem('rag_api_key') || '';
   const model = localStorage.getItem('rag_model') || '';
   const curl  = localStorage.getItem('rag_custom_url') || '';
+  const savedTone = localStorage.getItem('rag_tone') || 'basic';
 
   if (key) {
     $('settingsApiKey').value = key;
@@ -177,6 +180,9 @@ function loadSettings() {
   }
   if (curl) {
     $('settingsCustomBaseUrl').value = curl;
+  }
+  if ($('settingsToneSelect')) {
+    $('settingsToneSelect').value = savedTone;
   }
 
   return { pid, model };
@@ -193,10 +199,15 @@ function saveSettings() {
   else localStorage.removeItem('rag_api_key');
   localStorage.setItem('rag_model', modelValue);
   localStorage.setItem('rag_custom_url', $('settingsCustomBaseUrl').value.trim());
+  localStorage.setItem('rag_tone', tone());
   if (activeProvider) localStorage.setItem('rag_provider_id', activeProvider.id);
 }
 
-function setStatus(txt) { $('statusText').textContent = txt; }
+function setStatus(txt) {
+  $('statusText').textContent = txt;
+  const st = $('thinkingText');
+  if (st) st.textContent = txt;
+}
 
 async function readJson(res) {
   const d = await res.json();
@@ -489,6 +500,14 @@ function scrollBottom() {
   body.scrollTo({top: body.scrollHeight});
 }
 
+function updateScrollBtn() {
+  const body = $('chatBody');
+  const fab = $('scrollBottomBtn');
+  if (!body || !fab) return;
+  const dist = body.scrollHeight - body.scrollTop - body.clientHeight;
+  fab.classList.toggle('visible', dist > 240);
+}
+
 // -- Send question ----------------------------------
 async function sendQuestion(question) {
   if (!question || isSending) return;
@@ -500,6 +519,13 @@ async function sendQuestion(question) {
 
   isSending = true;
   updateSendBtn();
+  $('progressTrack').classList.add('active');
+  const thinking = $('thinkingStatus');
+  thinking.classList.add('visible');
+
+  const stopBtn = $('stopButton');
+  const onStop = () => { if (_abortCtrl) _abortCtrl.abort(); };
+  stopBtn.onclick = onStop;
 
   conversation.push({role: "user", content: question});
   // Keep last 20 messages to avoid overflowing the LLM context window.
@@ -567,6 +593,7 @@ async function sendQuestion(question) {
         api_key:  apiKey(),
         model:    apiModel(),
         base_url: baseUrl(),
+        tone:     tone(),
       }),
       signal: abortCtrl.signal,
     });
@@ -659,8 +686,9 @@ async function sendQuestion(question) {
     }
   } catch(err) {
     if (err.name === 'AbortError') return;
-    botMsg.classList.add('error');
-    bub.textContent = 'Lỗi: ' + err.message;
+    botMsg.classList.add('message--error');
+    bub.innerHTML = '';
+    bub.textContent = '⚠ Lỗi: ' + err.message;
     meta.textContent = '';
     conversation.push({role: "assistant", content: "Lỗi: " + err.message});
     if (conversation.length > 20) conversation.splice(0, conversation.length - 20);
@@ -668,6 +696,8 @@ async function sendQuestion(question) {
   } finally {
     isSending = false;
     _abortCtrl = null;
+    $('progressTrack').classList.remove('active');
+    $('thinkingStatus').classList.remove('visible');
     updateSendBtn();
   }
 }
@@ -724,6 +754,7 @@ async function submitReport() {
   fd.append('api_key',  apiKey());
   fd.append('model',    apiModel());
   fd.append('base_url', baseUrl());
+  fd.append('tone',     tone());
 
   try {
     const r = await fetch('/api/analyze-report', {
@@ -861,6 +892,8 @@ function autoResize() {
 }
 function updateSendBtn() {
   $('sendButton').disabled = !$('userInput').value.trim() || isSending;
+  $('sendButton').classList.toggle('hidden', isSending);
+  $('stopButton').classList.toggle('visible', isSending);
 }
 
 // -- Modal helpers ----------------------------------
@@ -910,6 +943,10 @@ document.querySelectorAll('.starter-card').forEach(c => {
 $('menuBtn').addEventListener('click', openSidebar);
 $('sidebarCloseBtn').addEventListener('click', closeSidebar);
 $('sidebarOverlay').addEventListener('click', closeSidebar);
+
+$('newChatBtn').addEventListener('click', () => { closeSidebar(); clearChat(); });
+$('scrollBottomBtn').addEventListener('click', () => scrollBottom());
+$('chatBody').addEventListener('scroll', updateScrollBtn);
 
 $('openSettingsBtn').addEventListener('click', () => { syncSettingsToModal(); openModal('settingsModal'); });
 $('headerOpenSettings').addEventListener('click', () => { syncSettingsToModal(); openModal('settingsModal'); });

@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import re
 import unicodedata
+from collections.abc import Iterator
 
 from core.config import (
     CHUNK_CHARS,
@@ -376,34 +377,56 @@ def chunk_pages(
     pages: list[tuple[int, str]],
     chunk_chars: int = CHUNK_CHARS,
     overlap: int = CHUNK_OVERLAP,
-) -> list[dict]:
-    """Split page texts into semantically-coherent overlapping chunks.
+) -> Iterator[dict]:
+    """Split page texts into semantically-coherent overlapping chunks (generator).
 
     Recursively splits on headers -> paragraphs -> sentences -> characters,
-    then merges units until target size is reached.
+    then merges units until target size is reached.  Paragraphs that are
+    split across adjacent pages are rejoined into a single chunk.
     """
-    chunks: list[dict] = []
+    carryover_sentences: list[str] = []
+    carryover_page: int = 1
+
     for page_number, text in pages:
         text = clean_text(text)
-        if not text:
+        if not text and not carryover_sentences:
             continue
 
-        # Recursive splitting: headers -> paragraphs -> sentences
-        sections = _split_headers(text)
-        all_sentences: list[str] = []
-        for sec in sections:
-            for para in _split_paragraphs(sec):
-                all_sentences.extend(_split_sentences(para))
+        # Split current page into sentences
+        page_sentences: list[str] = []
+        if text:
+            sections = _split_headers(text)
+            for sec in sections:
+                for para in _split_paragraphs(sec):
+                    page_sentences.extend(_split_sentences(para))
+
+        # Prepend carryover from the previous page
+        all_sentences = carryover_sentences + page_sentences
+        carryover_sentences = []
 
         # Merge sentences into target-sized chunks
         page_chunks = _merge_to_target(
             all_sentences, chunk_chars, overlap, CHUNK_MIN_LEN, CHUNK_MIN_STEP
         )
 
-        for ch in page_chunks:
-            chunks.append({"page_start": page_number, "page_end": page_number, "text": ch})
+        # If the last chunk is very short, carry it to the next page
+        if page_chunks and len(page_chunks[-1]) < chunk_chars * 0.35:
+            last = page_chunks.pop()
+            carryover_sentences = _split_sentences(last)
+            carryover_page = page_number
 
-    return chunks
+        for ch in page_chunks:
+            yield {"page_start": page_number, "page_end": page_number, "text": ch}
+
+    # Flush final carryover
+    if carryover_sentences:
+        text = " ".join(carryover_sentences)
+        if len(text) >= CHUNK_MIN_LEN:
+            yield {
+                "page_start": carryover_page,
+                "page_end": pages[-1][0] if pages else carryover_page,
+                "text": text,
+            }
 
 
 # ---------------------------------------------------------------------------

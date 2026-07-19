@@ -1,9 +1,10 @@
-"""extractors.py — Document parsing: PDF, EPUB, DOCX, TXT/MD → list of (page, text)."""
+"""extractors.py — Document parsing: PDF, EPUB, DOCX, TXT/MD → (page, text) pairs."""
 
 from __future__ import annotations
 
 import re
 import zipfile
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,23 @@ try:
 except Exception:
     _lxml_etree = None
     LXML_AVAILABLE = False
+
+# pytesseract is optional; needed only for scanned PDFs
+try:
+    import pytesseract as _pytesseract
+
+    _OCR_AVAILABLE = True
+except Exception:
+    _pytesseract = None  # type: ignore[assignment]
+    _OCR_AVAILABLE = False
+
+try:
+    from PIL import Image as _PILImage
+
+    _PIL_AVAILABLE = True
+except Exception:
+    _PILImage = None  # type: ignore[assignment]
+    _PIL_AVAILABLE = False
 
 _NS_W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -38,29 +56,6 @@ def _xml_parse(data: bytes) -> Any:
     import xml.etree.ElementTree as _ET
 
     return _ET.fromstring(data)
-
-
-def _iter_xml_text(data: bytes) -> list[str]:
-    """Walk XML *data* and collect all ``<w:t>`` text nodes.
-
-    Uses lxml's fast C iterparse when available; falls back to stdlib
-    ``ElementTree.iterparse`` which is slower but functionally equivalent.
-    """
-    parts: list[str] = []
-    tag = f"{{{_NS_W}}}t"
-    if _lxml_etree is not None:
-        for _, elem in _lxml_etree.iterparse(data, tag=tag, events=("end",)):
-            if elem.text:
-                parts.append(elem.text)
-            elem.clear()
-    else:
-        import xml.etree.ElementTree as _ET
-
-        for _, elem in _ET.iterparse(data, events=("end",)):
-            if elem.tag == tag and elem.text:
-                parts.append(elem.text)
-            elem.clear()
-    return parts
 
 
 def _html_text(data: str | bytes) -> str:
@@ -142,7 +137,34 @@ def _parse_opf_spine(root: Any) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# DOCX extractor
+# Table → markdown helper
+# ---------------------------------------------------------------------------
+
+
+def _table_to_markdown(rows: list[list[str]]) -> str:
+    """Convert a table (list of rows of cell strings) to a markdown table.
+
+    Returns an empty string when the table has no usable content.
+    """
+    cleaned: list[list[str]] = []
+    for row in rows:
+        cells = [clean_text(str(c)) if c is not None else "" for c in row]
+        if any(cells):
+            cleaned.append(cells)
+    if not cleaned:
+        return ""
+    width = max(len(r) for r in cleaned)
+    lines = []
+    for i, row in enumerate(cleaned):
+        row = row + [""] * (width - len(row))
+        lines.append("| " + " | ".join(row) + " |")
+        if i == 0:
+            lines.append("|" + "---|" * width)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# DOCX extractor (python-docx)
 # ---------------------------------------------------------------------------
 
 
@@ -152,29 +174,62 @@ def _safe_zip_entry(name: str) -> bool:
     return not any(p in ("..", "") for p in parts)
 
 
-def extract_docx_pages(path: Path) -> list[tuple[int, str]]:
-    """Extract text from a DOCX file, returning (page_index, text) pairs."""
-    pages: list[tuple[int, str]] = []
-    with zipfile.ZipFile(path) as docx:
-        names = set(n for n in docx.namelist() if _safe_zip_entry(n))
-        docs = [
-            n
-            for n in names
-            if n == "word/document.xml"
-            or (
-                n.startswith("word/")
-                and n.endswith(".xml")
-                and ("header" in n or "footer" in n)
-            )
-        ]
-        docs.sort(key=lambda n: 0 if n == "word/document.xml" else 1)
+# Target characters per pseudo-page for formats without real pages (DOCX).
+_PSEUDO_PAGE_CHARS = 4000
 
-        for index, name in enumerate(docs, start=1):
-            parts = _iter_xml_text(docx.read(name))
-            text = clean_text(" ".join(parts))
+
+def extract_docx_pages(path: Path) -> Iterator[tuple[int, str]]:
+    """Extract text from a DOCX file, yielding (page_index, text) pairs.
+
+    Uses python-docx to walk body paragraphs and tables in document order.
+    Tables are rendered as markdown so their structure survives chunking.
+    Headers and footers are deliberately excluded (boilerplate noise).
+    DOCX has no true pages, so content is grouped into ~4000-char
+    pseudo-pages to keep page metadata meaningful for citations.
+    """
+    from docx import Document
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    try:
+        document = Document(str(path))
+    except Exception as exc:
+        raise ValueError(
+            "Could not open this DOCX file. It may be corrupt or "
+            "password-protected. Remove the password or re-save it and try again."
+        ) from exc
+
+    # Collect text blocks (paragraphs + markdown tables) in document order
+    blocks: list[str] = []
+    body = document.element.body
+    for child in body.iterchildren():
+        if child.tag == qn("w:p"):
+            text = clean_text(Paragraph(child, document).text)
             if text:
-                pages.append((index, text))
-    return pages
+                blocks.append(text)
+        elif child.tag == qn("w:tbl"):
+            table = Table(child, document)
+            rows = [[cell.text for cell in row.cells] for row in table.rows]
+            md = _table_to_markdown(rows)
+            if md:
+                blocks.append(md)
+
+    # Group blocks into pseudo-pages and yield
+    current: list[str] = []
+    current_len = 0
+    page_num = 0
+    for block in blocks:
+        current.append(block)
+        current_len += len(block)
+        if current_len >= _PSEUDO_PAGE_CHARS:
+            page_num += 1
+            yield (page_num, "\n\n".join(current))
+            current = []
+            current_len = 0
+    if current:
+        page_num += 1
+        yield (page_num, "\n\n".join(current))
 
 
 # ---------------------------------------------------------------------------
@@ -182,9 +237,8 @@ def extract_docx_pages(path: Path) -> list[tuple[int, str]]:
 # ---------------------------------------------------------------------------
 
 
-def extract_epub_pages(path: Path) -> list[tuple[int, str]]:
-    """Extract text from an EPUB file in spine order, returning (page_index, text) pairs."""
-    pages: list[tuple[int, str]] = []
+def extract_epub_pages(path: Path) -> Iterator[tuple[int, str]]:
+    """Extract text from an EPUB file in spine order, yielding (page_index, text) pairs."""
     with zipfile.ZipFile(path) as book:
         all_names = book.namelist()
         names = set(n for n in all_names if _safe_zip_entry(n))
@@ -227,8 +281,39 @@ def extract_epub_pages(path: Path) -> list[tuple[int, str]]:
             seen.add(name)
             text = _html_text(book.read(name))
             if text:
-                pages.append((index, text))
-    return pages
+                yield (index, text)
+
+
+# ---------------------------------------------------------------------------
+# OCR helper (scanned PDFs)
+# ---------------------------------------------------------------------------
+
+
+def _ocr_page(page: Any) -> str:
+    """Render a pdfplumber page to an image and run OCR, returning the text.
+
+    Requires ``pytesseract`` and ``Pillow`` to be installed, and the
+    Tesseract-OCR engine to be on the system PATH.
+    """
+    if not _OCR_AVAILABLE or not _PIL_AVAILABLE:
+        return ""
+    try:
+        import subprocess, sys
+
+        subprocess.run(
+            ["tesseract", "--version"],
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        return ""
+    try:
+        img = page.to_image(resolution=250)
+        pil_image = img.original.convert("L")
+        text = _pytesseract.image_to_string(pil_image)
+        return clean_text(text or "")
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -236,53 +321,111 @@ def extract_epub_pages(path: Path) -> list[tuple[int, str]]:
 # ---------------------------------------------------------------------------
 
 
-def extract_pages(path: Path) -> list[tuple[int, str]]:
-    """Return a list of (page_number, text) tuples for any supported document format."""
+def extract_pages(path: Path) -> Iterator[tuple[int, str]]:
+    """Yield (page_number, text) tuples for any supported document format.
+
+    All formats are processed lazily so large files stream without loading
+    the entire document into memory.
+    """
     suffix = path.suffix.lower()
 
     if suffix == ".pdf":
         import pdfplumber  # type: ignore[reportMissingImports]
 
-        pages: list[tuple[int, str]] = []
-        with pdfplumber.open(str(path)) as pdf:
+        pypdf_reader: PdfReader | None = None
+        had_any_page = False
+
+        try:
+            pdf_handle = pdfplumber.open(str(path))
+        except Exception as exc:
+            raise ValueError(
+                "Could not open this PDF. It may be corrupt, password-protected, "
+                "or in an unsupported format. Remove the password and try again."
+            ) from exc
+
+        with pdf_handle as pdf:
             for index, page in enumerate(pdf.pages, start=1):
                 try:
                     text = clean_text(page.extract_text() or "")
                 except Exception:
                     text = ""
+
+                # Per-page pypdf fallback when pdfplumber gets no text
+                if not text:
+                    if pypdf_reader is None:
+                        try:
+                            pypdf_reader = PdfReader(str(path))
+                        except Exception:
+                            pass
+                    if pypdf_reader is not None:
+                        try:
+                            text = clean_text(
+                                pypdf_reader.pages[index - 1].extract_text() or ""
+                            )
+                        except Exception:
+                            pass
+
+                # Extract tables as markdown and append to text
+                try:
+                    tables = page.extract_tables()
+                    if tables:
+                        md_tables: list[str] = []
+                        for tbl in tables:
+                            md = _table_to_markdown(tbl)
+                            if md:
+                                md_tables.append(md)
+                        if md_tables:
+                            table_section = "\n\n" + "\n\n".join(md_tables)
+                            text = (text + table_section) if text else table_section
+                            text = clean_text(text)
+                except Exception:
+                    pass
+
+                # OCR fallback for scanned pages
+                if not text:
+                    text = _ocr_page(page)
+
                 if text:
-                    pages.append((index, text))
-        if not pages:
-            # Fallback: try pypdf for tricky PDFs pdfplumber can't handle
+                    had_any_page = True
+                    yield (index, text)
+
+        # OCR full-document fallback for completely scanned PDFs
+        if not had_any_page:
             try:
-                reader = PdfReader(str(path))
-                for index, page in enumerate(reader.pages, start=1):
-                    try:
-                        text = clean_text(page.extract_text() or "")
-                    except Exception:
-                        text = ""
-                    if text:
-                        pages.append((index, text))
+                with pdfplumber.open(str(path)) as pdf:
+                    for index, page in enumerate(pdf.pages, start=1):
+                        text = _ocr_page(page)
+                        if text:
+                            had_any_page = True
+                            yield (index, text)
             except Exception:
                 pass
-        if not pages:
+
+        if not had_any_page:
             raise ValueError(
                 "No readable text was found in this PDF. "
-                "If it is scanned, run OCR first or upload a text-based PDF."
+                "If it is scanned, install Tesseract OCR (https://github.com/tesseract-ocr/tesseract) "
+                "and ensure it is on your PATH, then try again."
             )
-        return pages
+        return
 
     if suffix == ".epub":
-        pages = extract_epub_pages(path)
-        if not pages:
+        had_any_page = False
+        for page in extract_epub_pages(path):
+            had_any_page = True
+            yield page
+        if not had_any_page:
             raise ValueError("No readable text was found in this EPUB file.")
-        return pages
+        return
 
     if suffix == ".docx":
-        pages = extract_docx_pages(path)
-        if not pages:
+        had_any_page = False
+        for page in extract_docx_pages(path):
+            had_any_page = True
+            yield page
+        if not had_any_page:
             raise ValueError("No readable text was found in this DOCX file.")
-        return pages
+        return
 
     if suffix == ".doc":
         raise ValueError(
@@ -291,9 +434,38 @@ def extract_pages(path: Path) -> list[tuple[int, str]]:
         )
 
     if suffix in {".txt", ".md"}:
-        text = clean_text(path.read_text(encoding="utf-8", errors="ignore"))
+        raw = path.read_bytes()
+        text = clean_text(raw.decode("utf-8", errors="replace"))
+        if "\ufffd" in text:
+            import logging as _log
+
+            _log.getLogger("rag.extractors").warning(
+                "Encoding issues detected in %s; replaced unreadable bytes with \ufffd. "
+                "If the output looks garbled, try re-saving the file as UTF-8.",
+                path.name,
+            )
         if not text:
             raise ValueError("No readable text was found in this text file.")
-        return [(1, text)]
+
+        # Split into pseudo-pages on paragraph boundaries for streaming
+        paragraphs = text.split("\n\n")
+        page_num = 0
+        buffer: list[str] = []
+        buffer_len = 0
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            buffer.append(para)
+            buffer_len += len(para)
+            if buffer_len >= _PSEUDO_PAGE_CHARS:
+                page_num += 1
+                yield (page_num, "\n\n".join(buffer))
+                buffer = []
+                buffer_len = 0
+        if buffer:
+            page_num += 1
+            yield (page_num, "\n\n".join(buffer))
+        return
 
     raise ValueError("RAG library accepts PDF, EPUB, DOCX, TXT, and MD files.")

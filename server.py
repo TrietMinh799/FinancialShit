@@ -12,6 +12,7 @@ from pathlib import Path
 from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.exceptions import HTTPException
 
 
 def _get_real_ip() -> str:
@@ -199,6 +200,36 @@ app = Flask(__name__, static_folder="web/static", template_folder="web")
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100 MB
 app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+@app.errorhandler(HTTPException)
+def _handle_http_exception(e: HTTPException) -> Response:
+    """Return JSON instead of HTML for HTTP errors on API endpoints."""
+    if request.path.startswith("/api/"):
+        return jsonify({
+            "error": e.description,
+            "message": e.description
+        }), e.code
+    return e.get_response()
+
+@app.before_request
+def _require_basic_auth() -> Response | None:
+    """Enforce HTTP Basic Authentication if credentials are set in the environment."""
+    import os
+    username = os.environ.get("VALUATION_RAG_USERNAME")
+    password = os.environ.get("VALUATION_RAG_PASSWORD")
+
+    # Bypass authentication if environment variables are not configured
+    if not username or not password:
+        return None
+
+    auth = request.authorization
+    if not auth or auth.username != username or auth.password != password:
+        return Response(
+            "Unauthorized access. Please log in with correct credentials.",
+            status=401,
+            headers={"WWW-Authenticate": 'Basic realm="Login Required"'}
+        )
+    return None
 
 
 @app.before_request
@@ -519,6 +550,7 @@ def ask_stream() -> Response:
     # deterministic fallback pipeline.
     mode = payload.get("mode") or "agent"
     use_agent = mode == "agent" and bool(api_key)
+    tone = payload.get("tone") or "basic"
 
     def generate_agent():
         try:
@@ -576,7 +608,7 @@ def ask_stream() -> Response:
                 return
 
             yield _sse({"status": "Generating answer with LLM..."})
-            for chunk in call_openai_llm_stream(question, citations, api_key, model, base_url, history=history):
+            for chunk in call_openai_llm_stream(question, citations, api_key, model, base_url, history=history, tone=tone):
                 if "token" in chunk:
                     yield _sse({"token": chunk["token"]})
                 elif "done" in chunk:
@@ -614,6 +646,7 @@ def ask() -> Response:
             payload.get("base_url") or LLM_BASE_URL,
             history=payload.get("messages") or [],
             use_iterative=False,  # disable multi-round retrieval for faster responses with slow models
+            tone=payload.get("tone") or "basic",
         )
         return jsonify(result)
     except Exception:
@@ -673,9 +706,12 @@ def upload_book() -> Response:
 
     try:
         result = _store.add_document(target, title, source_type)
+        if not result.get("inserted", True):
+            target.unlink(missing_ok=True)
         return jsonify(result)
     except Exception:
         logger.exception("upload-book error")
+        target.unlink(missing_ok=True)
         resp = jsonify({"error": "Failed to process uploaded book."})
         resp.status_code = 500
         return resp
@@ -722,15 +758,17 @@ def analyze_report_route() -> Response:
     api_key = request.form.get("api_key") or ""
     model = request.form.get("model") or OPENAI_MODEL
     base_url = request.form.get("base_url") or LLM_BASE_URL
+    tone = request.form.get("tone") or "basic"
 
     try:
-        result = analyze_report(_store, target, company, ticker, api_key, model, base_url)
+        result = analyze_report(_store, target, company, ticker, api_key, model, base_url, tone=tone)
         result["llm_report"] = generate_kb_company_report(
-            _store, company, ticker, api_key, model, base_url
+            _store, company, ticker, api_key, model, base_url, tone=tone
         )
         return jsonify(result)
     except Exception:
         logger.exception("analyze-report error")
+        target.unlink(missing_ok=True)
         resp = jsonify({"error": "Failed to analyze report."})
         resp.status_code = 500
         return resp
@@ -769,13 +807,23 @@ def main() -> None:
 
     # Preload embedding and reranker models at startup so the first
     # query doesn't block for 30-90 seconds loading ML models on CPU.
-    print("Loading SentenceTransformer (BAAI/bge-m3)…", flush=True)
-    from core.vector_store import load_embedding_model
-    load_embedding_model()
+    if os.environ.get("VALUATION_RAG_SKIP_MODELS") == "1":
+        print("Skipping preloading of ML models (VALUATION_RAG_SKIP_MODELS=1)", flush=True)
+    else:
+        print("Loading SentenceTransformer (BAAI/bge-m3)…", flush=True)
+        from core.vector_store import load_embedding_model
+        load_embedding_model()
 
-    print("Loading CrossEncoder (BAAI/bge-reranker-v2-m3)…", flush=True)
-    from core.reranker import load_reranker_model
-    load_reranker_model()
+        print("Loading CrossEncoder (BAAI/bge-reranker-v2-m3)…", flush=True)
+        from core.reranker import load_reranker_model
+        load_reranker_model()
+
+    username = os.environ.get("VALUATION_RAG_USERNAME")
+    password = os.environ.get("VALUATION_RAG_PASSWORD")
+    if username and password:
+        print("Basic Authentication: ENABLED", flush=True)
+    else:
+        print("Basic Authentication: DISABLED (set VALUATION_RAG_USERNAME and VALUATION_RAG_PASSWORD to enable)", flush=True)
 
     print(f"Valuation RAG running at http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=debug_mode, threaded=True)

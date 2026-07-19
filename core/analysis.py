@@ -271,6 +271,7 @@ def reason_analysis(
     api_key: str | None = None,
     model: str | None = None,
     base_url: str | None = None,
+    tone: str = "basic",
 ) -> dict:
     """Use LLM + book knowledge to produce reasoned commentary on scores and SWOT.
 
@@ -304,9 +305,17 @@ def reason_analysis(
         moat_signals, growth_signals, execution_signals, risk_signals,
         scores, book_cites,
     )
+    
+    if tone == "professional":
+        prompt = "[TONE: Professional - Write your commentary using formal financial terminology and precise language.]\n\n" + prompt
+    elif tone == "expert":
+        prompt = "[TONE: Expert - Write your commentary as a seasoned Managing Director. Enrich the analysis with your own financial reasoning. Mark insights not found in the evidence with [Analysis] or [Inference].]\n\n" + prompt
+
+    # We use a strict system prompt here to enforce JSON, overriding the default chat system prompt.
+    system_prompt = "You are an M&A valuation analyst. Output ONLY valid JSON."
 
     try:
-        raw = call_openai_llm(prompt, citations, api_key, model, base_url)
+        raw = call_openai_llm(prompt, citations, api_key, model, base_url, system_prompt=system_prompt)
         if not raw:
             return {}
         parsed = _parse_reasoning_response(raw)
@@ -335,6 +344,7 @@ def analyze_report(
     api_key: str | None = None,
     model: str | None = None,
     base_url: str | None = None,
+    tone: str = "basic",
 ) -> dict:
     """Parse *report_path*, score it, and persist the result in RUNS.
 
@@ -342,11 +352,13 @@ def analyze_report(
     When an API key is provided, uses the LLM to produce a reasoned commentary
     on the scores and SWOT, grounded in the uploaded knowledge base.
     """
-    pages = extract_pages(report_path)
+    pages = list(extract_pages(report_path))
     report_text = " ".join(text for _, text in pages)
 
     # Persist the report in the document store
-    store.add_document(report_path, f"{company} annual report", "annual_report")
+    doc_info = store.add_document(report_path, f"{company} annual report", "annual_report")
+    if not doc_info.get("inserted", True):
+        report_path.unlink(missing_ok=True)
 
     # Signal detection
     moat = matched_labels(report_text, MOAT_TERMS)
@@ -427,7 +439,7 @@ def analyze_report(
     reasoned = reason_analysis(
         store, company, ticker, report_text,
         moat, growth, execution, risks, scores,
-        api_key, model, base_url,
+        api_key, model, base_url, tone,
     )
     if reasoned:
         result["reasoned_analysis"] = reasoned

@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.config import OPENAI_MODEL, RERANK_TOP_K
@@ -45,7 +46,7 @@ from core.text_utils import query_terms, unique
 logger = logging.getLogger(__name__)
 
 # Hard ceiling on agent iterations (each costs one LLM round-trip)
-MAX_ITERATIONS = 4
+MAX_ITERATIONS = 2
 # Per-decision LLM timeout (seconds). Decisions are small completions.
 DECISION_TIMEOUT = 45
 # How many evidence summaries the agent sees per step (keeps context bounded)
@@ -389,6 +390,9 @@ def run_agent(
 
         else:
             log.append(f"unknown tool \"{tool}\" (ignored)")
+
+        # Throttle between agent steps to avoid hitting free-provider rate limits
+        time.sleep(1.0)
 
     # ------------------------------------------------------------------
     # Finalize: rerank + expand, then stream the answer

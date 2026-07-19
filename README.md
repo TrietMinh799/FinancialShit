@@ -68,6 +68,8 @@ The app uses the standard OpenAI-compatible **Chat Completions** API (`/v1/chat/
 | `LLM_BASE_URL` | No | `https://api.openai.com/v1` | Base URL of any OpenAI-compatible API endpoint |
 | `OPENAI_API_KEY` | No* | — | Default API key (can also be entered per-session in the UI) |
 | `OPENAI_MODEL` | No | `gpt-4.1-mini` | Default model name |
+| `VALUATION_RAG_USERNAME` | No | — | Username for HTTP Basic Authentication (Basic auth is enabled only if both username and password are set). |
+| `VALUATION_RAG_PASSWORD` | No | — | Password for HTTP Basic Authentication (Basic auth is enabled only if both username and password are set). |
 
 *\*Without a key, the app still works in fallback mode — answers are built from keyword-matched evidence only.*
 

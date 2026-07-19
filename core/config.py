@@ -49,6 +49,12 @@ LLM_STREAM_TIMEOUT: int = 300  # longer for streaming: free models can take minu
 LLM_REPORT_TIMEOUT: int = 300  # longer timeout for report analysis (larger prompts)
 LLM_DECOMPOSE_TIMEOUT: int = 25  # reduced: free/slow models fall back to raw question faster
 
+# Rate-limit protection — minimum seconds between LLM requests.
+# Increase this (e.g. 2.0) if you hit "too many requests" on free providers.
+LLM_REQUEST_DELAY: float = float(os.environ.get("LLM_REQUEST_DELAY", "1.5"))
+# Max retries on 429 / 5xx responses.
+LLM_MAX_RETRIES: int = int(os.environ.get("LLM_MAX_RETRIES", "3"))
+
 # ---------------------------------------------------------------------------
 # Model names
 # ---------------------------------------------------------------------------
