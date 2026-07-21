@@ -132,6 +132,13 @@ function _renderBlock(block) {
   ).join('') + '</p>';
 }
 
+function _safeAttr(url) {
+  url = url.trim();
+  const scheme = url.split(':')[0].toLowerCase();
+  if (['javascript', 'data', 'vbscript', 'file'].includes(scheme)) return '#blocked';
+  return url;
+}
+
 function inlineMd(text) {
   return text
     .replace(/`([^`]+)`/g, '<code>$1</code>')
@@ -140,7 +147,8 @@ function inlineMd(text) {
     .replace(/__(.+?)__/g, '<strong>$1</strong>')
     .replace(/\*(.+?)\*/g, '<em>$1</em>')
     .replace(/_(.+?)_/g, '<em>$1</em>')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) =>
+      '<a href="' + _safeAttr(u) + '" target="_blank" rel="noopener">' + t + '</a>');
 }
 
 let isSending   = false;

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -30,7 +31,7 @@ from core.config import (
 )
 from core.reranker import rerank
 from core.store import Store as _StoreT
-from core.text_utils import clean_text, matched_labels, unique
+from core.text_utils import clean_text, matched_labels, sanitize_injection, unique
 
 logger = logging.getLogger(__name__)
 
@@ -194,17 +195,25 @@ def _build_expert_preamble() -> str:
 # guarding against connect/TLS stalls that the socket timeout alone can miss.
 _HTTP_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="llm-http")
 
-# Global rate-limit tracker — ensures minimum spacing between LLM requests.
-_last_llm_request: float = 0.0
+# Per-provider rate-limit trackers — one counter per base_url so callers
+# using different providers (OpenAI, Groq, Together, etc.) don't throttle
+# each other.  Protected by a lock since _throttle may be called concurrently.
+_last_llm_request: dict[str, float] = {}
+_throttle_lock = threading.Lock()
 
 
-def _throttle() -> None:
-    """Sleep if needed to maintain LLM_REQUEST_DELAY between requests."""
-    global _last_llm_request
-    elapsed = time.time() - _last_llm_request
-    if elapsed < LLM_REQUEST_DELAY:
-        time.sleep(LLM_REQUEST_DELAY - elapsed)
-    _last_llm_request = time.time()
+def _throttle(base_url: str = "") -> None:
+    """Sleep if needed to maintain LLM_REQUEST_DELAY between requests to *base_url*."""
+    with _throttle_lock:
+        last = _last_llm_request.get(base_url, 0.0)
+        elapsed = time.time() - last
+        if elapsed < LLM_REQUEST_DELAY:
+            sleep_for = LLM_REQUEST_DELAY - elapsed
+        else:
+            sleep_for = 0.0
+        _last_llm_request[base_url] = time.time()
+    if sleep_for:
+        time.sleep(sleep_for)
 
 
 def _post_chat_completion(
@@ -215,13 +224,14 @@ def _post_chat_completion(
 ) -> dict:
     """POST *payload* to ``{base_url}/chat/completions`` and return parsed JSON.
 
-    The blocking request runs in a shared thread pool with a hard *timeout* so a
-    hung provider connection cannot pin the calling worker indefinitely.
+    The entire retry loop runs inside the shared thread pool so that backoff
+    sleeps do not block the calling (web handler) thread.  A hard wall-clock
+    *timeout* guards against hung connections.
 
     Retries on 429 (rate-limited) and 5xx (server error) responses with
     exponential backoff (1s, 2s, 4s) to handle free-provider throttling.
     """
-    _throttle()
+    _throttle(base_url)
     data = json.dumps(payload).encode("utf-8")
     request = Request(
         f"{base_url}/chat/completions",
@@ -233,45 +243,43 @@ def _post_chat_completion(
         method="POST",
     )
 
-    def _run() -> dict:
-        with urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode("utf-8"))
+    def _run_with_retry() -> dict:
+        last_exc: Exception | None = None
+        for attempt in range(LLM_MAX_RETRIES + 1):
+            try:
+                with urlopen(request, timeout=timeout) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                last_exc = exc
+                status = exc.code
+                if (status == 429 or status >= 500) and attempt < LLM_MAX_RETRIES:
+                    backoff = 1.0 * (2 ** attempt)
+                    logging.getLogger(__name__).warning(
+                        "LLM HTTP %d (attempt %d/%d), retrying in %.0fs…",
+                        status, attempt + 1, LLM_MAX_RETRIES + 1, backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if attempt < LLM_MAX_RETRIES:
+                    backoff = 1.0 * (2 ** attempt)
+                    logging.getLogger(__name__).warning(
+                        "LLM error (attempt %d/%d), retrying in %.0fs…",
+                        attempt + 1, LLM_MAX_RETRIES + 1, backoff,
+                    )
+                    time.sleep(backoff)
+                    continue
+                raise
+        raise last_exc or RuntimeError("LLM request failed after retries")
 
-    last_exc: Exception | None = None
-    for attempt in range(LLM_MAX_RETRIES + 1):
-        try:
-            future = _HTTP_POOL.submit(_run)
-            return future.result(timeout=timeout + 5)
-        except FutureTimeoutError as exc:
-            future.cancel()
-            raise TimeoutError(f"LLM request exceeded {timeout}s") from exc
-        except HTTPError as exc:
-            last_exc = exc
-            status = exc.code
-            # Retry on 429 (rate-limit) and 5xx (server errors)
-            if (status == 429 or status >= 500) and attempt < LLM_MAX_RETRIES:
-                backoff = 1.0 * (2 ** attempt)
-                logging.getLogger(__name__).warning(
-                    "LLM HTTP %d (attempt %d/%d), retrying in %.0fs…",
-                    status, attempt + 1, LLM_MAX_RETRIES + 1, backoff,
-                )
-                time.sleep(backoff)
-                continue
-            raise
-        except Exception as exc:
-            last_exc = exc
-            if attempt < LLM_MAX_RETRIES:
-                backoff = 1.0 * (2 ** attempt)
-                logging.getLogger(__name__).warning(
-                    "LLM error (attempt %d/%d), retrying in %.0fs…",
-                    attempt + 1, LLM_MAX_RETRIES + 1, backoff,
-                )
-                time.sleep(backoff)
-                continue
-            raise
-
-    # Should not be reached — last attempt either returned or raised.
-    raise last_exc or RuntimeError("LLM request failed after retries")
+    future = _HTTP_POOL.submit(_run_with_retry)
+    try:
+        return future.result(timeout=timeout + 5)
+    except FutureTimeoutError as exc:
+        future.cancel()
+        raise TimeoutError(f"LLM request exceeded {timeout}s") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -353,13 +361,22 @@ def call_openai_llm_stream(
     system_prompt: str | None = None,
     history: list | None = None,
     tone: str = "basic",
+    _fallback_depth: int = 0,
 ):
     """Stream tokens from an OpenAI-compatible Chat Completions endpoint.
 
     Yields dicts:
         {"token": "..."}  # a chunk of text
         {"done": True, "citations": [...], "mode": "llm"}  # finished
+
+    * _fallback_depth is internal — tracks recursion depth to prevent
+      unbounded fallback chains (e.g. TimeoutError -> TimeoutError -> ...).
     """
+    if _fallback_depth > 1:
+        logger.error("LLM stream fallback recursion exceeded max depth; giving up.")
+        yield {"done": True, "citations": citations, "mode": "llm", "full_text": ""}
+        return
+
     model = model or OPENAI_MODEL
     base_url = _normalize_base_url(base_url)
     if not api_key:
@@ -371,7 +388,14 @@ def call_openai_llm_stream(
 
     messages: list[dict] = [{"role": "system", "content": system_content}]
     if history:
-        messages.extend(history)
+        safe_history = [
+            {
+                "role": m.get("role", "user"),
+                "content": sanitize_injection(m.get("content", "")),
+            }
+            for m in history
+        ]
+        messages.extend(safe_history)
 
     final_question = question
     if tone == "expert":
@@ -404,8 +428,7 @@ def call_openai_llm_stream(
     )
 
     full_text = ""
-    _throttle()
-    last_error: str | None = None
+    _throttle(base_url)
     for attempt in range(LLM_MAX_RETRIES + 1):
         try:
             with urlopen(request, timeout=LLM_STREAM_TIMEOUT) as response:
@@ -439,23 +462,35 @@ def call_openai_llm_stream(
                 )
                 time.sleep(backoff)
                 continue
-            # Retries exhausted — fall back to a basic-tone LLM answer (no tone styling)
-            for chunk in call_openai_llm_stream(
-                question, citations, api_key, model, base_url, history=history, tone="basic"
-            ):
-                yield chunk
+            # Retries exhausted — try basic tone once before giving up
+            if _fallback_depth == 0:
+                for chunk in call_openai_llm_stream(
+                    question, citations, api_key, model, base_url, history=history, tone="basic",
+                    _fallback_depth=_fallback_depth + 1,
+                ):
+                    yield chunk
+                return
+            yield {"done": True, "citations": citations, "mode": "llm", "full_text": full_text}
             return
         except TimeoutError:
-            for chunk in call_openai_llm_stream(
-                question, citations, api_key, model, base_url, history=history, tone="basic"
-            ):
-                yield chunk
+            if _fallback_depth == 0:
+                for chunk in call_openai_llm_stream(
+                    question, citations, api_key, model, base_url, history=history, tone="basic",
+                    _fallback_depth=_fallback_depth + 1,
+                ):
+                    yield chunk
+                return
+            yield {"done": True, "citations": citations, "mode": "llm", "full_text": full_text}
             return
         except Exception:
-            for chunk in call_openai_llm_stream(
-                question, citations, api_key, model, base_url, history=history, tone="basic"
-            ):
-                yield chunk
+            if _fallback_depth == 0:
+                for chunk in call_openai_llm_stream(
+                    question, citations, api_key, model, base_url, history=history, tone="basic",
+                    _fallback_depth=_fallback_depth + 1,
+                ):
+                    yield chunk
+                return
+            yield {"done": True, "citations": citations, "mode": "llm", "full_text": full_text}
             return
 
 
@@ -520,7 +555,14 @@ def call_openai_llm(
 
     messages: list[dict] = [{"role": "system", "content": system_content}]
     if history:
-        messages.extend(history)
+        safe_history = [
+            {
+                "role": m.get("role", "user"),
+                "content": sanitize_injection(m.get("content", "")),
+            }
+            for m in history
+        ]
+        messages.extend(safe_history)
 
     final_question = question
     if tone == "expert":
@@ -532,6 +574,7 @@ def call_openai_llm(
             "content": f"Question: {final_question}\n\n{context}",
         }
     )
+
     payload = {
         "model": model,
         "messages": messages,
@@ -710,12 +753,24 @@ def answer_question(
     if question not in sub_queries:
         sub_queries.append(question)
     all_citations: list[dict] = []
-    citations: list[dict] = []
+    seen_ids: set[tuple] = set()
+    deduped: list[dict] = []
 
     for iteration in range(max_iterations + 1):
-        for q in sub_queries:
-            all_citations.extend(store.hybrid_search(q, ["book", "annual_report"], 30))
-        citations = unique(all_citations, 50)
+        with ThreadPoolExecutor(max_workers=min(4, len(sub_queries))) as pool:
+            batch_results = list(pool.map(
+                lambda q: store.hybrid_search(q, ["book", "annual_report"], 30),
+                sub_queries,
+            ))
+        for batch in batch_results:
+            for item in batch:
+                all_citations.append(item)
+                key = (item.get("document_id"), item.get("chunk_id"),
+                       item.get("page_start"), item.get("snippet"))
+                if key not in seen_ids:
+                    seen_ids.add(key)
+                    deduped.append(item)
+        citations = deduped[:50]
         if citations:
             # Re-rank against the English query so relevance matches the English snippets.
             rerank_query = " ".join(sub_queries) if sub_queries else question

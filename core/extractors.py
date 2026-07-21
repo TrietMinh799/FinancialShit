@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import re
 import zipfile
 from collections.abc import Iterator, Sequence
@@ -13,7 +14,10 @@ from pypdf import PdfReader
 
 from core.text_utils import clean_text
 
-# lxml is optional but ~5-10x faster for XML/HTML parsing
+# Decompression-bomb protection for EPUB/DOCX (ZIP-based formats).
+_MAX_DECOMPRESSED_BYTES = 500 * 1024 * 1024  # 500 MB total
+_MAX_ZIP_ENTRIES = 10_000  # sanity limit on ZIP entries
+
 try:
     from lxml import etree as _lxml_etree  # type: ignore[reportAttributeAccessIssue]
     LXML_AVAILABLE = True
@@ -179,6 +183,23 @@ def _safe_zip_entry(name: str) -> bool:
 _PSEUDO_PAGE_CHARS = 4000
 
 
+def _check_zip_bomb(path: Path) -> None:
+    """Raise ValueError if *path* is a ZIP bomb (excessive decompressed size or entries)."""
+    with zipfile.ZipFile(path) as zf:
+        names = zf.namelist()
+        if len(names) > _MAX_ZIP_ENTRIES:
+            raise ValueError(
+                f"File contains {len(names)} entries — exceeds limit of {_MAX_ZIP_ENTRIES}. "
+                "It may be a decompression bomb."
+            )
+        total = sum(info.file_size for info in zf.infolist())
+        if total > _MAX_DECOMPRESSED_BYTES:
+            raise ValueError(
+                f"Estimated decompressed size ({total} bytes) exceeds limit "
+                f"({_MAX_DECOMPRESSED_BYTES} bytes). The file may be a decompression bomb."
+            )
+
+
 def extract_docx_pages(path: Path) -> Iterator[tuple[int, str]]:
     """Extract text from a DOCX file, yielding (page_index, text) pairs.
 
@@ -193,6 +214,7 @@ def extract_docx_pages(path: Path) -> Iterator[tuple[int, str]]:
     from docx.table import Table
     from docx.text.paragraph import Paragraph
 
+    _check_zip_bomb(path)
     try:
         document = Document(str(path))
     except Exception as exc:
@@ -241,6 +263,7 @@ def extract_docx_pages(path: Path) -> Iterator[tuple[int, str]]:
 def extract_epub_pages(path: Path) -> Iterator[tuple[int, str]]:
     """Extract text from an EPUB file in spine order, yielding (page_index, text) pairs."""
     with zipfile.ZipFile(path) as book:
+        _check_zip_bomb(path)
         all_names = book.namelist()
         names = set(n for n in all_names if _safe_zip_entry(n))
 
@@ -290,14 +313,9 @@ def extract_epub_pages(path: Path) -> Iterator[tuple[int, str]]:
 # ---------------------------------------------------------------------------
 
 
-def _ocr_page(page: Any) -> str:
-    """Render a pdfplumber page to an image and run OCR, returning the text.
-
-    Requires ``pytesseract`` and ``Pillow`` to be installed, and the
-    Tesseract-OCR engine to be on the system PATH.
-    """
-    if not _OCR_AVAILABLE or not _PIL_AVAILABLE:
-        return ""
+@functools.lru_cache(maxsize=1)
+def _tesseract_available() -> bool:
+    """Check once whether the Tesseract-OCR engine is on PATH."""
     try:
         import subprocess
 
@@ -306,7 +324,20 @@ def _ocr_page(page: Any) -> str:
             capture_output=True,
             timeout=5,
         )
+        return True
     except Exception:
+        return False
+
+
+def _ocr_page(page: Any) -> str:
+    """Render a pdfplumber page to an image and run OCR, returning the text.
+
+    Requires ``pytesseract`` and ``Pillow`` to be installed, and the
+    Tesseract-OCR engine to be on the system PATH.
+    """
+    if not _OCR_AVAILABLE or not _PIL_AVAILABLE:
+        return ""
+    if not _tesseract_available():
         return ""
     try:
         img = page.to_image(resolution=250)
@@ -364,7 +395,12 @@ def extract_pages(path: Path) -> Iterator[tuple[int, str]]:
 
                 # Extract tables as markdown and append to text
                 try:
-                    tables = page.extract_tables()
+                    # Cheap heuristic: skip extract_tables (expensive geometry
+                    # analysis) when the page has no lines/rects.
+                    has_lines = bool(
+                        page.lines or page.rects or page.edges
+                    )
+                    tables = page.extract_tables() if has_lines else None
                     if tables:
                         md_tables: list[str] = []
                         for tbl in tables:
@@ -385,18 +421,6 @@ def extract_pages(path: Path) -> Iterator[tuple[int, str]]:
                 if text:
                     had_any_page = True
                     yield (index, text)
-
-        # OCR full-document fallback for completely scanned PDFs
-        if not had_any_page:
-            try:
-                with pdfplumber.open(str(path)) as pdf:
-                    for index, page in enumerate(pdf.pages, start=1):
-                        text = _ocr_page(page)
-                        if text:
-                            had_any_page = True
-                            yield (index, text)
-            except Exception:
-                pass
 
         if not had_any_page:
             raise ValueError(
@@ -431,38 +455,46 @@ def extract_pages(path: Path) -> Iterator[tuple[int, str]]:
         )
 
     if suffix in {".txt", ".md"}:
-        raw = path.read_bytes()
-        text = clean_text(raw.decode("utf-8", errors="replace"))
-        if "\ufffd" in text:
-            import logging as _log
-
-            _log.getLogger("rag.extractors").warning(
-                "Encoding issues detected in %s; replaced unreadable bytes with \ufffd. "
-                "If the output looks garbled, try re-saving the file as UTF-8.",
-                path.name,
+        file_size = path.stat().st_size
+        if file_size > _MAX_DECOMPRESSED_BYTES:
+            raise ValueError(
+                f"Text file is {file_size} bytes — exceeds the {_MAX_DECOMPRESSED_BYTES}-byte limit. "
+                "Please split the file into smaller parts."
             )
-        if not text:
-            raise ValueError("No readable text was found in this text file.")
-
-        # Split into pseudo-pages on paragraph boundaries for streaming
-        paragraphs = text.split("\n\n")
         page_num = 0
-        buffer: list[str] = []
-        buffer_len = 0
-        for para in paragraphs:
-            para = para.strip()
-            if not para:
-                continue
-            buffer.append(para)
-            buffer_len += len(para)
-            if buffer_len >= _PSEUDO_PAGE_CHARS:
+        buf: list[str] = []
+        buf_len = 0
+        had_any = False
+        warned_encoding = False
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not warned_encoding and "\ufffd" in line:
+                    import logging as _log
+                    _log.getLogger("rag.extractors").warning(
+                        "Encoding issues detected in %s; replaced unreadable bytes with \ufffd. "
+                        "If the output looks garbled, try re-saving the file as UTF-8.",
+                        path.name,
+                    )
+                    warned_encoding = True
+                stripped = clean_text(line).strip()
+                if not stripped and buf:
+                    para = "\n".join(buf)
+                    had_any = True
+                    buf_len += len(para)
+                    buf = [para]
+                    if buf_len >= _PSEUDO_PAGE_CHARS:
+                        page_num += 1
+                        yield (page_num, "\n\n".join(buf))
+                        buf = []
+                        buf_len = 0
+                elif stripped:
+                    buf.append(stripped)
+            if buf:
+                had_any = True
                 page_num += 1
-                yield (page_num, "\n\n".join(buffer))
-                buffer = []
-                buffer_len = 0
-        if buffer:
-            page_num += 1
-            yield (page_num, "\n\n".join(buffer))
+                yield (page_num, "\n\n".join(buf))
+        if not had_any:
+            raise ValueError("No readable text was found in this text file.")
         return
 
     raise ValueError("RAG library accepts PDF, EPUB, DOCX, TXT, and MD files.")

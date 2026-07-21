@@ -215,7 +215,7 @@ class Store:
                 ).fetchone()[0]
 
                 if existing["source_type"] != source_type and rows:
-                    self.vector_store().delete_document(existing["id"])
+                    self.vector_store().delete_document(existing["id"], existing["source_type"])
                     re_chunks = [
                         {"text": r["text"], "page_start": r["page_start"], "page_end": r["page_end"]}
                         for r in rows
@@ -223,7 +223,6 @@ class Store:
                     self.vector_store().index_chunks(
                         existing["id"], rows[0]["title"], source_type, re_chunks
                     )
-                    self.vector_store().invalidate_search_cache()
 
                 return {
                     "document_id": existing["id"],
@@ -353,14 +352,14 @@ class Store:
         """Remove a document and its chunks from SQLite, FTS, ChromaDB, and disk."""
         with self._connect() as conn:
             doc = conn.execute(
-                "SELECT id, filename FROM documents WHERE id = ?", (document_id,)
+                "SELECT id, filename, source_type FROM documents WHERE id = ?", (document_id,)
             ).fetchone()
             if not doc:
                 raise ValueError(f"Document {document_id} not found.")
 
             conn.execute("DELETE FROM documents WHERE id = ?", (document_id,))
 
-        self.vector_store().delete_document(document_id)
+        self.vector_store().delete_document(document_id, doc["source_type"])
 
         fpath = UPLOAD_DIR / doc["filename"]
         # Guard against path traversal: the resolved path must stay within UPLOAD_DIR
@@ -403,7 +402,7 @@ class Store:
             ).fetchall()
 
         # Delete from old collection, index into new collection
-        self.vector_store().delete_document(document_id)
+        self.vector_store().delete_document(document_id, old_type)
         chunks = [
             {"text": row["text"], "page_start": row["page_start"], "page_end": row["page_end"]}
             for row in rows
@@ -412,7 +411,6 @@ class Store:
             self.vector_store().index_chunks(
                 document_id, doc["title"], new_source_type, chunks,
             )
-        self.vector_store().invalidate_search_cache()
 
         return {"ok": True, "document_id": document_id, "source_type": new_source_type, "changed": True}
 

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import contextlib
+import heapq
+import itertools
 import logging
 import os
+import threading
 from typing import Any
 
 import chromadb
@@ -21,6 +24,7 @@ logger = logging.getLogger(__name__)
 
 _MODEL_NAME = os.environ.get("EMBED_MODEL", "BAAI/bge-m3")
 _model: SentenceTransformer | None = None
+_model_lock = threading.Lock()
 
 # Separate HNSW collections so dense report chunks do not dilute reference
 # book search results and vice versa.
@@ -36,7 +40,9 @@ _COLLECTION_MAP: dict[str, str] = {
 def _get_model() -> SentenceTransformer:
     global _model
     if _model is None:
-        _model = SentenceTransformer(_MODEL_NAME)
+        with _model_lock:
+            if _model is None:
+                _model = SentenceTransformer(_MODEL_NAME)
     return _model
 
 
@@ -44,6 +50,10 @@ def _get_model() -> SentenceTransformer:
 # Using hash instead of full text as key saves memory
 _embed_cache = LRUCache(maxsize=2000, default_ttl=None)
 _search_cache = LRUCache(maxsize=500, default_ttl=120)
+# Per-source-type generation counters for targeted cache invalidation.
+# Incremented when new chunks are indexed for a given source_type;
+# embedded in cache keys so stale entries are naturally missed.
+_cache_generations: dict[str, int] = {}
 
 
 def load_embedding_model() -> None:
@@ -96,11 +106,14 @@ class VectorStore:
     def __init__(self) -> None:
         self._client: Any = None
         self._collections: dict[str, Any] = {}
+        self._init_lock = threading.Lock()
 
     def _ensure(self, name: str) -> Any:
         if self._client is None:
-            CHROMA_DIR.mkdir(parents=True, exist_ok=True)
-            self._client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+            with self._init_lock:
+                if self._client is None:
+                    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+                    self._client = chromadb.PersistentClient(path=str(CHROMA_DIR))
         if name not in self._collections:
             self._collections[name] = self._client.get_or_create_collection(
                 name=name,
@@ -149,14 +162,17 @@ class VectorStore:
                 }
             )
 
+        _UPSERT_BATCH = 500
         embeddings = _embed(documents)
-        coll.upsert(
-            ids=ids,
-            documents=documents,
-            embeddings=embeddings,
-            metadatas=metadatas,
-        )
-        self.invalidate_search_cache()
+        for batch_start in range(0, len(ids), _UPSERT_BATCH):
+            batch_end = batch_start + _UPSERT_BATCH
+            coll.upsert(
+                ids=ids[batch_start:batch_end],
+                documents=documents[batch_start:batch_end],
+                embeddings=embeddings[batch_start:batch_end],
+                metadatas=metadatas[batch_start:batch_end],
+            )
+        self.invalidate_search_cache(source_type)
 
     def search(
         self,
@@ -169,7 +185,9 @@ class VectorStore:
         Results are cached for 120s so repeated/similar queries skip
         ChromaDB lookups and embedding computation.
         """
-        cache_key = f"{_MODEL_NAME}||{query}||{sorted(source_types or ['book'])}||{limit}"
+        srcs = sorted(source_types or ["book"])
+        gen_part = "|".join(f"{s}={_cache_generations.get(s, 0)}" for s in srcs)
+        cache_key = f"{_MODEL_NAME}||{query}||{gen_part}||{limit}"
         cached = _search_cache.get(cache_key)
         if cached is not None:
             return list(cached)  # type: ignore[arg-type]
@@ -178,7 +196,7 @@ class VectorStore:
         collection_names = self._resolve(source_types)
         per_coll_limit = limit
 
-        all_results: list[dict] = []
+        per_coll_lists: list[list[dict]] = []
 
         for coll_name in collection_names:
             coll = self._ensure(coll_name)
@@ -195,6 +213,7 @@ class VectorStore:
             docs_list = results["documents"][0]
             meta_list = results["metadatas"][0]
 
+            coll_results: list[dict] = []
             for i, id_str in enumerate(ids_list):
                 meta = meta_list[i] if meta_list else {}
                 text = docs_list[i] or ""
@@ -202,7 +221,7 @@ class VectorStore:
                 page_end_val = meta.get("page_end", "")
                 page_start_str = str(page_start_val) if page_start_val else ""
                 page_end_str = str(page_end_val) if page_end_val else ""
-                all_results.append(
+                coll_results.append(
                     {
                         "chunk_id": int(id_str.split("_")[1]) if "_" in id_str else 0,
                         "document_id": int(str(meta.get("document_id", 0))),
@@ -214,15 +233,27 @@ class VectorStore:
                         "score": float(distances[i]),
                     }
                 )
+            per_coll_lists.append(coll_results)
 
-        all_results.sort(key=lambda x: x["score"])
-        result = all_results[:limit]
+        # ChromaDB returns results pre-sorted by distance per collection.
+        # Use k-way merge (O(n log k)) instead of full sort (O(n log n)).
+        merged = heapq.merge(*per_coll_lists, key=lambda x: x["score"])
+        result = list(itertools.islice(merged, limit))
         _search_cache.put(cache_key, result, ttl=120)
         return result
 
-    def invalidate_search_cache(self) -> None:
-        """Clear vector search cache (call after indexing new chunks)."""
-        _search_cache.invalidate()
+    def invalidate_search_cache(self, source_type: str | None = None) -> None:
+        """Invalidate vector search cache.
+
+        When *source_type* is provided, only entries querying that source
+        are invalidated (via generation counters embedded in cache keys).
+        When *source_type* is None, the entire cache is cleared.
+        """
+        if source_type:
+            _cache_generations[source_type] = _cache_generations.get(source_type, 0) + 1
+        else:
+            _cache_generations.clear()
+            _search_cache.invalidate()
 
     def clear_all(self) -> None:
         """Delete all collections and re-create them empty.
@@ -238,18 +269,25 @@ class VectorStore:
         self._collections.clear()
         _search_cache.invalidate()
 
-    def delete_document(self, document_id: int) -> None:
-        """Remove every chunk that belongs to *document_id* from all known collections.
+    def delete_document(self, document_id: int, source_type: str | None = None) -> None:
+        """Remove every chunk that belongs to *document_id*.
 
-        Uses the persistent ChromaDB client to list all collections so chunks
-        are cleaned up even if the collection hasn't been accessed yet in this
-        session (fixes lazy-init bug where ``_collections`` could be empty).
+        When *source_type* is provided, only the collection for that type
+        is queried (avoids listing/scanninevery collection).
         """
         if self._client is None:
             CHROMA_DIR.mkdir(parents=True, exist_ok=True)
             self._client = chromadb.PersistentClient(path=str(CHROMA_DIR))
-        for coll in self._client.list_collections():
+        if source_type:
+            coll_name = _COLLECTION_MAP.get(source_type, _BOOKS_COLLECTION)
             try:
+                coll = self._ensure(coll_name)
                 coll.delete(where={"document_id": str(document_id)})
             except Exception as exc:
-                logger.warning("ChromaDB delete failed in collection %s: %s", coll.name, exc)
+                logger.warning("ChromaDB delete failed in collection %s: %s", coll_name, exc)
+        else:
+            for coll in self._client.list_collections():
+                try:
+                    coll.delete(where={"document_id": str(document_id)})
+                except Exception as exc:
+                    logger.warning("ChromaDB delete failed in collection %s: %s", coll.name, exc)

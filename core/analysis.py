@@ -8,6 +8,7 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from core.config import (
     EXECUTION_TERMS,
@@ -22,17 +23,48 @@ from core.extractors import extract_pages
 from core.llm import call_openai_llm
 from core.reranker import rerank
 from core.store import Store
+from concurrent.futures import ThreadPoolExecutor
+
 from core.text_utils import (
+    _AHOCORASICK_AVAILABLE,
     annual_hits,
+    build_automaton,
     clip,
-    matched_labels,
-    mention_count,
+    scan_vocab,
     unique,
 )
+
+# Aho-Corasick automata built once at module load for O(text)-time matching.
+if _AHOCORASICK_AVAILABLE:
+    _MOAT_AUTO = build_automaton(MOAT_TERMS)
+    _GROWTH_AUTO = build_automaton(GROWTH_TERMS)
+    _EXECUTION_AUTO = build_automaton(EXECUTION_TERMS)
+    _RISK_AUTO = build_automaton(RISK_TERMS)
+else:
+    _MOAT_AUTO = _GROWTH_AUTO = _EXECUTION_AUTO = _RISK_AUTO = None
 
 # ---------------------------------------------------------------------------
 # Score computation
 # ---------------------------------------------------------------------------
+
+
+def _label_and_count(text: str, vocab: dict[str, str], automaton: Any = None) -> tuple[list[str], int]:
+    """Single-pass label match + mention count over *vocab*.
+
+    Uses an Aho-Corasick automaton when available (O(text + matches)),
+    falling back to O(vocab × text) substring search.
+    """
+    if automaton is not None:
+        return scan_vocab(text, automaton)
+    lower = text.lower()
+    labels: set[str] = set()
+    total = 0
+    for term, label in vocab.items():
+        c = lower.count(term)
+        if c:
+            labels.add(label)
+            total += c
+    return sorted(labels), total
 
 
 def _compute_scores(
@@ -43,10 +75,10 @@ def _compute_scores(
     risks: list[str],
 ) -> dict:
     """Compute five sub-scores and an overall score from term-match counts."""
-    moat_mentions = mention_count(report_text, MOAT_TERMS)
-    growth_mentions = mention_count(report_text, GROWTH_TERMS)
-    execution_mentions = mention_count(report_text, EXECUTION_TERMS)
-    risk_mentions = mention_count(report_text, RISK_TERMS)
+    _, moat_mentions = _label_and_count(report_text, MOAT_TERMS, _MOAT_AUTO)
+    _, growth_mentions = _label_and_count(report_text, GROWTH_TERMS, _GROWTH_AUTO)
+    _, execution_mentions = _label_and_count(report_text, EXECUTION_TERMS, _EXECUTION_AUTO)
+    _, risk_mentions = _label_and_count(report_text, RISK_TERMS, _RISK_AUTO)
 
     log_scale = max(1.0, math.log10(max(1000, len(report_text))))
 
@@ -290,8 +322,9 @@ def reason_analysis(
         "valuation methodology DCF ROIC WACC framework analyst approach",
     ]
     book_cites: list[dict] = []
-    for q in kb_queries:
-        book_cites.extend(store.hybrid_search(q, ["book"], 5))
+    with ThreadPoolExecutor(max_workers=min(4, len(kb_queries))) as pool:
+        for batch in pool.map(lambda q: store.hybrid_search(q, ["book"], 5), kb_queries):
+            book_cites.extend(batch)
     book_cites = unique(book_cites, 8)
 
     if book_cites:
@@ -360,11 +393,11 @@ def analyze_report(
     if not doc_info.get("inserted", True):
         report_path.unlink(missing_ok=True)
 
-    # Signal detection
-    moat = matched_labels(report_text, MOAT_TERMS)
-    growth = matched_labels(report_text, GROWTH_TERMS)
-    execution = matched_labels(report_text, EXECUTION_TERMS)
-    risks = matched_labels(report_text, RISK_TERMS)
+    # Signal detection (single-pass: labels + counts from one .lower() per vocab)
+    moat, _ = _label_and_count(report_text, MOAT_TERMS, _MOAT_AUTO)
+    growth, _ = _label_and_count(report_text, GROWTH_TERMS, _GROWTH_AUTO)
+    execution, _ = _label_and_count(report_text, EXECUTION_TERMS, _EXECUTION_AUTO)
+    risks, _ = _label_and_count(report_text, RISK_TERMS, _RISK_AUTO)
 
     scores = _compute_scores(report_text, moat, growth, execution, risks)
     moat_rating, moat_assessment = _moat_rating(scores["moat_score"])
@@ -390,9 +423,19 @@ def analyze_report(
     ]
     knowledge: list[dict] = []
     report_cites: list[dict] = []
-    for q in queries:
-        knowledge.extend(store.search(q, ["book"], 4))
-        report_cites.extend(annual_hits(pages, q, 4))
+    lowered_pages = [(pn, txt.lower()) for pn, txt in pages]
+    with ThreadPoolExecutor(max_workers=min(4, len(queries))) as pool:
+        kn, rc = zip(*list(pool.map(
+            lambda q: (
+                store.search(q, ["book"], 4),
+                annual_hits(lowered_pages, q, 4, lowered=True),
+            ),
+            queries,
+        )))
+    for items in kn:
+        knowledge.extend(items)
+    for items in rc:
+        report_cites.extend(items)
 
     result = {
         "run_id": uuid.uuid4().hex,

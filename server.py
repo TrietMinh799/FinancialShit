@@ -41,14 +41,14 @@ from core.llm import (
 )
 from core.reranker import rerank
 from core.store import Store, safe_filename
-from core.text_utils import clean_text, query_terms, sanitize_field, unique
+from core.text_utils import clean_text, query_terms, sanitize_field, sanitize_injection, unique
 
 logger = logging.getLogger(__name__)
 
 # Redact API keys from logs (OpenAI, OpenRouter, Groq, Together, etc.)
 import re as _re
 class _RedactFilter(logging.Filter):
-    _API_KEY_RE = _re.compile(r"(sk-[a-zA-Z0-9_\-]{20,}|gsk_[a-zA-Z0-9]{20,}|sk-or-v1-[a-zA-Z0-9_\-]{20,})")
+    _API_KEY_RE = _re.compile(r"(sk-[a-zA-Z0-9_\-]{20,}|gsk_[a-zA-Z0-9]{20,}|sk-or-v1-[a-zA-Z0-9_\-]{20,}|tgp_v1_[a-zA-Z0-9_\-]{20,}|together-[a-zA-Z0-9_\-]{20,})")
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):
             record.msg = self._API_KEY_RE.sub("[REDACTED]", record.msg)
@@ -532,7 +532,7 @@ def _sse(data: dict) -> str:
 @limiter.limit("30 per minute")
 def ask_stream() -> Response:
     payload = request.get_json(silent=True) or {}
-    question = clean_text(payload.get("question", ""))
+    question = sanitize_injection(clean_text(payload.get("question", "")))
     if not question:
         resp = jsonify({"error": "Type a question first."})
         resp.status_code = 400

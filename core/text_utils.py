@@ -51,7 +51,7 @@ _INJECTION_PATTERN: re.Pattern[str] = re.compile(
     "you\\s+are\\s+now\\s+(?:a|an)\\s+|"
     "new\\s+(?:instructions?|role|persona|identity)\\s*[:.]|"
     "act\\s+as\\s+(?:a|an|if)\\s+|"
-    "switch\\s+(?:to|into)\\s+(?:a\\s+)?(?:new\\s+)?(?:role|mode|persona)|"
+    "switch\\s+(?:to|into)\\s+(?:a\\s+)?(?:new\\s+)?(?:\\w+\\s+)?(?:role|mode|persona|state)|"
     "system\\s*:\\s*|"
     "<\\s*/?\\s*system\\s*>|"
     "<\\s*/?\\s*retrieved_evidence\\s*>|"
@@ -191,7 +191,11 @@ def query_terms(query: str, limit: int = QUERY_TERM_LIMIT) -> list[str]:
     ``"cong ty"`` still matches ``"công ty"`` via LIKE fallback.
     """
     terms: list[str] = []
-    for raw in (query, remove_diacritics(query)):
+    normalized = remove_diacritics(query)
+    sources = [query]
+    if normalized != query:
+        sources.append(normalized)
+    for raw in sources:
         for token in _TOKEN_PATTERN.findall(raw.lower()):
             if len(token) < 3 or token in STOPWORDS:
                 continue
@@ -261,10 +265,12 @@ def _split_sentences(text: str) -> list[str]:
         s = s.strip()
         if not s:
             continue
-        if merged and any(merged[-1].lower().endswith(abbr) for abbr in _ABBREVIATIONS):
-            merged[-1] = merged[-1] + " " + s
-        else:
-            merged.append(s)
+        if merged:
+            last_lower = merged[-1].lower()
+            if any(last_lower.endswith(abbr) for abbr in _ABBREVIATIONS):
+                merged[-1] = merged[-1] + " " + s
+                continue
+        merged.append(s)
     return merged
 
 
@@ -436,7 +442,11 @@ def chunk_pages(
 def snippet_for(text: str, terms: list[str], max_chars: int = SNIPPET_MAX_CHARS) -> str:
     """Return a short excerpt of *text* that is most likely to contain *terms*."""
     lower = text.lower()
-    positions = [lower.find(term) for term in terms if lower.find(term) >= 0]
+    positions = []
+    for term in terms:
+        pos = lower.find(term)
+        if pos >= 0:
+            positions.append(pos)
     if not positions:
         return clean_text(text[:max_chars])
     center = min(positions)
@@ -445,18 +455,65 @@ def snippet_for(text: str, terms: list[str], max_chars: int = SNIPPET_MAX_CHARS)
 
 
 # ---------------------------------------------------------------------------
-# Vocabulary matching
+# Vocabulary matching — Aho-Corasick automaton (linear-time multi-pattern)
 # ---------------------------------------------------------------------------
+
+try:
+    import ahocorasick
+
+    def build_automaton(vocab: dict[str, str]) -> ahocorasick.Automaton:
+        """Build an Aho-Corasick automaton from a *vocab* (term → label dict).
+
+        Once built, use ``scan_vocab(text, automaton)`` for O(text + matches)
+        matching instead of O(vocab_size × text_length).
+        """
+        a = ahocorasick.Automaton()
+        for term, label in vocab.items():
+            a.add_word(term, (term, label))
+        a.make_automaton()
+        return a
+
+    def scan_vocab(text: str, automaton: ahocorasick.Automaton) -> tuple[list[str], int]:
+        """Single-pass label + count scan using a pre-built automaton.
+
+        Returns ``(sorted_labels, total_mentions)``.
+        """
+        lower = text.lower()
+        labels: set[str] = set()
+        count = 0
+        for _, (_, label) in automaton.iter(lower):
+            labels.add(label)
+            count += 1
+        return sorted(labels), count
+
+    _AHOCORASICK_AVAILABLE = True
+
+except ImportError:
+    _AHOCORASICK_AVAILABLE = False
+
+    def build_automaton(vocab: dict[str, str]) -> None:  # type: ignore[return]
+        return None
+
+    def scan_vocab(text: str, _automaton: None) -> tuple[list[str], int]:  # type: ignore[return]
+        return [], 0
 
 
 def matched_labels(text: str, vocab: dict[str, str]) -> list[str]:
-    """Return sorted list of human-readable labels whose terms appear in *text*."""
+    """Return sorted list of human-readable labels whose terms appear in *text*.
+
+    Falls back to O(vocab × text) substring search when Aho-Corasick
+    is not installed.
+    """
     lower = text.lower()
     return sorted({label for term, label in vocab.items() if term in lower})
 
 
 def mention_count(text: str, vocab: dict[str, str]) -> int:
-    """Count total keyword occurrences across all vocabulary terms."""
+    """Count total keyword occurrences across all vocabulary terms.
+
+    Falls back to O(vocab × text) substring search when Aho-Corasick
+    is not installed.
+    """
     lower = text.lower()
     return sum(lower.count(term) for term in vocab)
 
@@ -496,12 +553,22 @@ def unique(items: list[dict], limit: int = 50) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def annual_hits(pages: list[tuple[int, str]], query: str, limit: int = 10) -> list[dict]:
-    """Score raw pages against *query* terms and return top hits."""
+def annual_hits(
+    pages: list[tuple[int, str]],
+    query: str,
+    limit: int = 10,
+    *,
+    lowered: bool = False,
+) -> list[dict]:
+    """Score raw pages against *query* terms and return top hits.
+
+    When *lowered* is True, each page text is assumed to already be
+    lowercased — skips the redundant ``.lower()`` call per page.
+    """
     terms = query_terms(query)
     scored: list[dict] = []
     for page_number, text in pages:
-        lower = text.lower()
+        lower = text if lowered else text.lower()
         score = sum(lower.count(term) for term in terms)
         if score:
             scored.append(
