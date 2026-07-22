@@ -169,7 +169,14 @@ class Store:
         If the identical file (by SHA-256) is already indexed, the existing
         record is returned with ``inserted=False``.
         """
-        pages = list(extract_pages(path))
+        upload_root = UPLOAD_DIR.resolve()
+        resolved_path = path.resolve()
+        try:
+            resolved_path.relative_to(upload_root)
+        except ValueError as exc:
+            raise ValueError("File path is outside the allowed upload directory.") from exc
+
+        pages = list(extract_pages(resolved_path))
         if not pages:
             raise ValueError("No readable text was found in this file.")
         # Reports are dense; smaller chunks improve retrieval precision.
@@ -182,7 +189,7 @@ class Store:
         if not chunks:
             raise ValueError("No usable chunks were created from this file.")
 
-        content_hash = document_hash(path)
+        content_hash = document_hash(resolved_path)
         char_count = sum(len(text) for _, text in pages)
 
         with self._connect() as conn:
