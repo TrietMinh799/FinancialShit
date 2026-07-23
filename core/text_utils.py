@@ -77,12 +77,12 @@ _CONTROL_CHARS_PATTERN = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # Header splitting patterns
 _HEADER_PATTERN = re.compile(
     r"(?m)^("
-    r"(?:#{1,6}\s+.+)"              # Markdown headers
-    r"|(?:\d+\.\s+[A-Z].+)"         # Numbered sections: "1. Introduction"
-    r"|(?:[A-Z][A-Z\s]{2,}:)"       # ALL CAPS with colon: "INTRODUCTION:"
-    r"|(?:Chapter\s+\d+[:\.\s])"    # Chapter N
-    r"|(?:Section\s+\d+[:\.\s])"    # Section N
-    r"|(?:Appendix\s+[A-Z][:\.\s])" # Appendix A
+    r"(?:#{1,6}\s+.+)"  # Markdown headers
+    r"|(?:\d+\.\s+[A-Z].+)"  # Numbered sections: "1. Introduction"
+    r"|(?:[A-Z][A-Z\s]{2,}:)"  # ALL CAPS with colon: "INTRODUCTION:"
+    r"|(?:Chapter\s+\d+[:\.\s])"  # Chapter N
+    r"|(?:Section\s+\d+[:\.\s])"  # Section N
+    r"|(?:Appendix\s+[A-Z][:\.\s])"  # Appendix A
     r")",
     re.MULTILINE,
 )
@@ -104,11 +104,55 @@ _SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+(?=[A-Z])|(?<=[。！？])\s
 
 # Common abbreviations to avoid false sentence splits
 _ABBREVIATIONS = {
-    "mr.", "mrs.", "ms.", "dr.", "prof.", "sr.", "jr.", "vs.", "etc.", "e.g.", "i.e.",
-    "inc.", "ltd.", "llc.", "corp.", "co.", "u.s.", "u.k.", "e.u.", "p.m.", "a.m.",
-    "no.", "vol.", "ch.", "fig.", "tab.", "sec.", "pp.", "ed.", "trans.", "rev.",
-    "jan.", "feb.", "mar.", "apr.", "jun.", "jul.", "aug.", "sep.", "oct.", "nov.", "dec.",
-    "mon.", "tue.", "wed.", "thu.", "fri.", "sat.", "sun.",
+    "mr.",
+    "mrs.",
+    "ms.",
+    "dr.",
+    "prof.",
+    "sr.",
+    "jr.",
+    "vs.",
+    "etc.",
+    "e.g.",
+    "i.e.",
+    "inc.",
+    "ltd.",
+    "llc.",
+    "corp.",
+    "co.",
+    "u.s.",
+    "u.k.",
+    "e.u.",
+    "p.m.",
+    "a.m.",
+    "no.",
+    "vol.",
+    "ch.",
+    "fig.",
+    "tab.",
+    "sec.",
+    "pp.",
+    "ed.",
+    "trans.",
+    "rev.",
+    "jan.",
+    "feb.",
+    "mar.",
+    "apr.",
+    "jun.",
+    "jul.",
+    "aug.",
+    "sep.",
+    "oct.",
+    "nov.",
+    "dec.",
+    "mon.",
+    "tue.",
+    "wed.",
+    "thu.",
+    "fri.",
+    "sat.",
+    "sun.",
 }
 
 # Transition words that indicate natural boundaries
@@ -220,8 +264,10 @@ def _split_headers(text: str) -> list[str]:
     if not parts or len(parts) == 1:
         return [text]
 
-    # Reconstruct: header + following content
-    sections = []
+    # Reconstruct: leading text before first header + header + following content
+    sections: list[str] = []
+    if parts[0].strip():
+        sections.append(parts[0].strip())
     for i in range(1, len(parts), 2):
         header = parts[i].strip()
         content = parts[i + 1] if i + 1 < len(parts) else ""
@@ -231,21 +277,24 @@ def _split_headers(text: str) -> list[str]:
 
 def _split_paragraphs(text: str) -> list[str]:
     """Split text on blank lines (double newline), preserving single newlines.
-    
+
     Also merges header-like lines (markdown headers, numbered sections, ALL CAPS)
     with the following paragraph so they don't become standalone fragments.
     """
     paragraphs = re.split(r"\n\s*\n", text)
     cleaned = [clean_text(p) for p in paragraphs if p.strip()]
-    
+
     # Merge header-like lines with following paragraph using module-level pattern
     merged: list[str] = []
     i = 0
     while i < len(cleaned):
         p = cleaned[i]
-        if (i + 1 < len(cleaned) and 
-            not p.rstrip().endswith(('.', '!', '?', '。', '！', '？')) and
-            _HEADER_LINE_PATTERN.match(p.strip())):
+        if (
+            i + 1 < len(cleaned)
+            and not p.rstrip().endswith((".", "!", "?", "。", "！", "？"))
+            and _HEADER_LINE_PATTERN.match(p.strip())
+            and not _HEADER_LINE_PATTERN.match(cleaned[i + 1].strip())
+        ):
             # Header line - merge with next paragraph
             merged.append(p + " " + cleaned[i + 1])
             i += 2

@@ -140,16 +140,20 @@ function _safeAttr(url) {
 }
 
 function inlineMd(text) {
-  return text
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/__(.+?)__/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g, '<em>$1</em>')
-    .replace(/_(.+?)_/g, '<em>$1</em>')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, t, u) =>
-      '<a href="' + _safeAttr(u) + '" target="_blank" rel="noopener">' + t + '</a>');
+  return text.replace(
+    /`([^`]+)`|\*\*\*(.+?)\*\*\*|\*\*(.+?)\*\*|__(.+?)__|\*(.+?)\*|_(.+?)_|\[([^\]]+)\]\(([^)]+)\)/g,
+    (m, code, b3, b2, u2, i1, i2, linkText, linkUrl) => {
+      if (code) return `<code>${code}</code>`;
+      if (b3) return `<strong><em>${b3}</em></strong>`;
+      if (b2 || u2) return `<strong>${b2 || u2}</strong>`;
+      if (i1 || i2) return `<em>${i1 || i2}</em>`;
+      if (linkText) return `<a href="${_safeAttr(linkUrl)}" target="_blank" rel="noopener">${linkText}</a>`;
+      return m;
+    }
+  );
 }
+
+const MAX_RENDERED_MESSAGES = 40;
 
 let isSending   = false;
 let _abortCtrl  = null;
@@ -490,7 +494,15 @@ function appendMessage(role, html, sources = []) {
   wrap.appendChild(av);
   wrap.appendChild(cont);
   $('messagesList').appendChild(wrap);
+  pruneMessageList();
   scrollBottom();
+}
+
+function pruneMessageList() {
+  const list = $('messagesList');
+  while (list.children.length > MAX_RENDERED_MESSAGES) {
+    list.removeChild(list.firstChild);
+  }
 }
 
 function appendUserMessage(text) {
@@ -567,27 +579,49 @@ async function sendQuestion(question) {
   
   let full_text = '';
   let lastRenderLen = 0;
+  let renderedHtml = '';
   let renderTimer = null;
   let statusText = 'Đang truy xuất · ' + (activeProvider?.label || '') + '...';
   setStatus(statusText);
+
+  function isInsideOpenFence(fragment) {
+    return ((fragment.match(/```/g) || []).length % 2) === 1;
+  }
+
+  function lastCompleteTableRowBoundary(text, fromIndex) {
+    const tail = text.slice(fromIndex);
+    if (!/^\s*\|.+\|/.test(tail)) return -1;
+    const lastNL = tail.lastIndexOf('\n');
+    return lastNL === -1 ? -1 : fromIndex + lastNL + 1;
+  }
 
   function scheduleRender() {
     if (renderTimer) return;
     renderTimer = setTimeout(() => {
       renderTimer = null;
-      // Only render new text since last render
-      if (full_text.length > lastRenderLen) {
-        bub.innerHTML = renderMarkdown(full_text);
-        lastRenderLen = full_text.length;
+      let lastBoundary = full_text.lastIndexOf('\n\n', full_text.length - 1);
+      while (lastBoundary > lastRenderLen &&
+             isInsideOpenFence(full_text.slice(lastRenderLen, lastBoundary))) {
+        lastBoundary = full_text.lastIndexOf('\n\n', lastBoundary - 1);
       }
+      const tableRowB = lastCompleteTableRowBoundary(full_text, lastRenderLen);
+      if (tableRowB > lastBoundary) lastBoundary = tableRowB;
+      if (lastBoundary > lastRenderLen) {
+        renderedHtml += renderMarkdown(full_text.slice(lastRenderLen, lastBoundary));
+        lastRenderLen = lastBoundary;
+      }
+      const tail = renderMarkdown(full_text.slice(lastRenderLen));
+      bub.innerHTML = renderedHtml + tail;
+      meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
     }, 80);
   }
   function flushRender() {
     if (renderTimer) { clearTimeout(renderTimer); renderTimer = null; }
     if (full_text.length > lastRenderLen) {
-      bub.innerHTML = renderMarkdown(full_text);
+      renderedHtml += renderMarkdown(full_text.slice(lastRenderLen));
       lastRenderLen = full_text.length;
     }
+    bub.innerHTML = renderedHtml;
   }
   
   try {
@@ -661,7 +695,6 @@ async function sendQuestion(question) {
           } else if (data.token) {
             full_text += data.token;
             scheduleRender();
-            meta.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) + (activeProvider ? ` · ${activeProvider.label}` : '');
           } else if (data.done) {
             flushRender();
             const sources = (data.citations || []).map(c => c.title || 'Nguồn');
@@ -870,8 +903,40 @@ function renderAnalysis(r, company, ticker) {
         ${actHtml}
       </div>
       ${repHtml}
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="export-btn" data-run-id="${safe(r.run_id)}" onclick="exportValuationModel(this.dataset.runId)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Tải Excel Định Giá
+        </button>
+      </div>
     </div>`);
   appendBotText(`Phân tích ${company} hoàn thành. Bạn có thể hỏi bất kỳ câu hỏi nào về báo cáo này.`);
+}
+
+async function exportValuationModel(runId) {
+  try {
+    const res = await fetch('/api/export-model', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({run_id: runId}),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({error: 'Export failed'}));
+      appendBotText('Lỗi xuất Excel: ' + (err.error || res.statusText));
+      return;
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = res.headers.get('Content-Disposition')?.match(/filename="?([^"]+)"?/)?.[1] || 'valuation.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch(e) {
+    appendBotText('Lỗi xuất Excel: ' + e.message);
+  }
 }
 
 // -- Test key ---------------------------------------

@@ -28,6 +28,7 @@ def _get_real_ip() -> str:
     return ip
 
 from core.analysis import analyze_report
+from core.valuation_model import ValuationModelBuilder
 from core.agent import run_agent
 from core.config import LLM_BASE_URL, OPENAI_MODEL, ensure_dirs, RERANK_TOP_K
 from core.llm import (
@@ -770,6 +771,47 @@ def analyze_report_route() -> Response:
         logger.exception("analyze-report error")
         target.unlink(missing_ok=True)
         resp = jsonify({"error": "Failed to analyze report."})
+        resp.status_code = 500
+        return resp
+
+
+# ---------------------------------------------------------------------------
+# Export: Download valuation model as Excel
+# ---------------------------------------------------------------------------
+
+
+@app.route("/api/export-model", methods=["POST"])
+@limiter.limit("10 per hour")
+def export_model() -> Response:
+    """Return a downloadable .xlsx valuation workbook for a prior analysis."""
+    data = request.get_json(silent=True) or {}
+    run_id = data.get("run_id", "").strip()
+    if not run_id or run_id not in RUNS:
+        resp = jsonify({"error": "Invalid or expired run_id. Run an analysis first."})
+        resp.status_code = 404
+        return resp
+
+    analysis = RUNS[run_id]
+    financials = analysis.get("financial_data")
+
+    try:
+        builder = ValuationModelBuilder(analysis, financials)
+        xlsx = builder.build()
+        company = analysis.get("project", {}).get("company", "company")
+        ticker = analysis.get("project", {}).get("ticker", "NA")
+        filename = f"valuation_{company}_{ticker}_{run_id[:8]}.xlsx"
+
+        return Response(
+            xlsx.getvalue(),
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(xlsx.getvalue())),
+            },
+        )
+    except Exception:
+        logger.exception("export-model error")
+        resp = jsonify({"error": "Failed to generate Excel workbook."})
         resp.status_code = 500
         return resp
 

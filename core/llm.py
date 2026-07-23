@@ -41,16 +41,19 @@ logger = logging.getLogger(__name__)
 
 # Default allowlist — override via ALLOWED_LLM_BASE_URLS env var (comma-separated)
 # For local providers (Ollama, etc.), add the URL to the env var.
-_DEFAULT_ALLOWED_BASE_URLS = frozenset((
-    "https://api.openai.com/v1",
-    "https://openrouter.ai/api/v1",
-    "https://api.groq.com/openai/v1",
-    "https://api.together.xyz/v1",
-))
+_DEFAULT_ALLOWED_BASE_URLS = frozenset(
+    (
+        "https://api.openai.com/v1",
+        "https://openrouter.ai/api/v1",
+        "https://api.groq.com/openai/v1",
+        "https://api.together.xyz/v1",
+    )
+)
 
 
 def _parse_allowed_base_urls() -> frozenset[str]:
     import os
+
     raw = os.environ.get("ALLOWED_LLM_BASE_URLS", "")
     if raw:
         return frozenset(u.strip().rstrip("/") for u in raw.split(",") if u.strip())
@@ -175,6 +178,7 @@ _TONE_PROMPTS: dict[str, str] = {
     ),
 }
 
+
 def _build_expert_preamble() -> str:
     """Build an expert-mode context preamble with industry/valuation hints."""
     parts = [
@@ -185,6 +189,7 @@ def _build_expert_preamble() -> str:
         "- Growth sustainability factors: TAM expansion, market share trajectory, unit economics",
     ]
     return "\n".join(parts) + "\n\n"
+
 
 # ---------------------------------------------------------------------------
 # HTTP transport
@@ -253,10 +258,13 @@ def _post_chat_completion(
                 last_exc = exc
                 status = exc.code
                 if (status == 429 or status >= 500) and attempt < LLM_MAX_RETRIES:
-                    backoff = 1.0 * (2 ** attempt)
+                    backoff = 1.0 * (2**attempt)
                     logging.getLogger(__name__).warning(
                         "LLM HTTP %d (attempt %d/%d), retrying in %.0fs…",
-                        status, attempt + 1, LLM_MAX_RETRIES + 1, backoff,
+                        status,
+                        attempt + 1,
+                        LLM_MAX_RETRIES + 1,
+                        backoff,
                     )
                     time.sleep(backoff)
                     continue
@@ -264,10 +272,12 @@ def _post_chat_completion(
             except Exception as exc:
                 last_exc = exc
                 if attempt < LLM_MAX_RETRIES:
-                    backoff = 1.0 * (2 ** attempt)
+                    backoff = 1.0 * (2**attempt)
                     logging.getLogger(__name__).warning(
                         "LLM error (attempt %d/%d), retrying in %.0fs…",
-                        attempt + 1, LLM_MAX_RETRIES + 1, backoff,
+                        attempt + 1,
+                        LLM_MAX_RETRIES + 1,
+                        backoff,
                     )
                     time.sleep(backoff)
                     continue
@@ -455,17 +465,26 @@ def call_openai_llm_stream(
         except HTTPError as exc:
             status = exc.code
             if (status == 429 or status >= 500) and attempt < LLM_MAX_RETRIES:
-                backoff = 1.0 * (2 ** attempt)
+                backoff = 1.0 * (2**attempt)
                 logging.getLogger(__name__).warning(
                     "LLM stream HTTP %d (attempt %d/%d), retrying in %.0fs…",
-                    status, attempt + 1, LLM_MAX_RETRIES + 1, backoff,
+                    status,
+                    attempt + 1,
+                    LLM_MAX_RETRIES + 1,
+                    backoff,
                 )
                 time.sleep(backoff)
                 continue
             # Retries exhausted — try basic tone once before giving up
             if _fallback_depth == 0:
                 for chunk in call_openai_llm_stream(
-                    question, citations, api_key, model, base_url, history=history, tone="basic",
+                    question,
+                    citations,
+                    api_key,
+                    model,
+                    base_url,
+                    history=history,
+                    tone="basic",
                     _fallback_depth=_fallback_depth + 1,
                 ):
                     yield chunk
@@ -475,7 +494,13 @@ def call_openai_llm_stream(
         except TimeoutError:
             if _fallback_depth == 0:
                 for chunk in call_openai_llm_stream(
-                    question, citations, api_key, model, base_url, history=history, tone="basic",
+                    question,
+                    citations,
+                    api_key,
+                    model,
+                    base_url,
+                    history=history,
+                    tone="basic",
                     _fallback_depth=_fallback_depth + 1,
                 ):
                     yield chunk
@@ -485,7 +510,13 @@ def call_openai_llm_stream(
         except Exception:
             if _fallback_depth == 0:
                 for chunk in call_openai_llm_stream(
-                    question, citations, api_key, model, base_url, history=history, tone="basic",
+                    question,
+                    citations,
+                    api_key,
+                    model,
+                    base_url,
+                    history=history,
+                    tone="basic",
                     _fallback_depth=_fallback_depth + 1,
                 ):
                     yield chunk
@@ -542,9 +573,7 @@ def call_openai_llm(
         return None
 
     # Cache check
-    cache_key = _make_cache_key(
-        question, citations, model, base_url, system_prompt, history, tone
-    )
+    cache_key = _make_cache_key(question, citations, model, base_url, system_prompt, history, tone)
     if cache_key in _llm_cache:
         logger.info("llm cache hit for: %s", question[:50])
         return _llm_cache[cache_key]
@@ -628,7 +657,7 @@ _llm_cache = LRUCache(maxsize=500, default_ttl=3600)
 def _citations_hash(citations: list[dict]) -> str:
     """Deterministic hash of citation content for cache key."""
     parts = sorted(
-        f"{c.get('document_id','')}:{c.get('chunk_id','')}:{c.get('snippet','')[:120]}"
+        f"{c.get('document_id', '')}:{c.get('chunk_id', '')}:{c.get('snippet', '')[:120]}"
         for c in citations
     )
     return hashlib.sha256("".join(parts).encode()).hexdigest()[:16]
@@ -711,7 +740,7 @@ def decompose_query(
             lines = [ln for ln in lines if len(ln) > 5]
             if lines:
                 return lines[:3]
-    except (TimeoutError, Exception):
+    except TimeoutError, Exception:
         # Free/slow models often timeout or queue; fall back to raw question
         pass
 
@@ -758,15 +787,21 @@ def answer_question(
 
     for iteration in range(max_iterations + 1):
         with ThreadPoolExecutor(max_workers=min(4, len(sub_queries))) as pool:
-            batch_results = list(pool.map(
-                lambda q: store.hybrid_search(q, ["book", "annual_report"], 30),
-                sub_queries,
-            ))
+            batch_results = list(
+                pool.map(
+                    lambda q: store.hybrid_search(q, ["book", "annual_report"], 30),
+                    sub_queries,
+                )
+            )
         for batch in batch_results:
             for item in batch:
                 all_citations.append(item)
-                key = (item.get("document_id"), item.get("chunk_id"),
-                       item.get("page_start"), item.get("snippet"))
+                key = (
+                    item.get("document_id"),
+                    item.get("chunk_id"),
+                    item.get("page_start"),
+                    item.get("snippet"),
+                )
                 if key not in seen_ids:
                     seen_ids.add(key)
                     deduped.append(item)
@@ -785,7 +820,9 @@ def answer_question(
         # Simple gap detection: if we have < 3 distinct documents or all from same doc,
         # or if citations have low scores, try to retrieve more.
         distinct_docs = len({c.get("document_id") for c in citations})
-        low_score_ratio = sum(1 for c in citations if c.get("score", 1) > 0.3) / max(1, len(citations))
+        low_score_ratio = sum(1 for c in citations if c.get("score", 1) > 0.3) / max(
+            1, len(citations)
+        )
 
         if distinct_docs >= 2:
             break
@@ -794,9 +831,12 @@ def answer_question(
         try:
             followup_prompt = (
                 "The user asked: " + question + "\n\n"
-                "We retrieved these citations:\n" +
-                "\n".join(f"[{i+1}] {c.get('title','')} p.{c.get('page_start','?')}: {c.get('snippet','')[:120]}"
-                          for i, c in enumerate(citations[:8])) + "\n\n"
+                "We retrieved these citations:\n"
+                + "\n".join(
+                    f"[{i + 1}] {c.get('title', '')} p.{c.get('page_start', '?')}: {c.get('snippet', '')[:120]}"
+                    for i, c in enumerate(citations[:8])
+                )
+                + "\n\n"
                 "What specific follow-up question would fill the biggest gap in our evidence? "
                 "Return ONLY one English question, no explanation."
             )

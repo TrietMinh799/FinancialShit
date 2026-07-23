@@ -20,6 +20,7 @@ from core.config import (
     RUNS,
 )
 from core.extractors import extract_pages
+from core.financial_extractor import compute_derived_metrics, extract_financials
 from core.llm import call_openai_llm
 from core.reranker import rerank
 from core.store import Store
@@ -399,6 +400,14 @@ def analyze_report(
     execution, _ = _label_and_count(report_text, EXECUTION_TERMS, _EXECUTION_AUTO)
     risks, _ = _label_and_count(report_text, RISK_TERMS, _RISK_AUTO)
 
+    # Financial data extraction (best-effort, does not block on failure)
+    try:
+        financial_data = extract_financials(report_text)
+        derived = compute_derived_metrics(financial_data)
+        financial_data["derived_metrics"] = derived
+    except Exception:
+        financial_data = {}
+
     scores = _compute_scores(report_text, moat, growth, execution, risks)
     moat_rating, moat_assessment = _moat_rating(scores["moat_score"])
     growth_rating = (
@@ -471,6 +480,7 @@ def analyze_report(
             "opportunities": opportunities,
             "threats": threats,
         },
+        "financial_data": financial_data,
         "growth_actions": _build_growth_actions(moat, growth, risks)[:7],
         "citations": {
             "knowledge": unique(knowledge, 10),
